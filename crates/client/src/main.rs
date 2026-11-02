@@ -8,7 +8,7 @@ mod uinput;
 
 use glidekm_core::config::Config;
 use glidekm_core::event::{encode_all, Event};
-use glidekm_core::session::{self, Transport, PKT_DATA, PKT_INIT};
+use glidekm_core::session::{self, Transport, PKT_DATA, PKT_DISCOVER, PKT_INIT};
 use glidekm_core::{debug, info, warn};
 use sink::{Recorder, Sink};
 use state::State;
@@ -142,6 +142,12 @@ fn serve<S: Sink>(
             Ok((n, from)) => {
                 let pkt = &buf[..n];
                 match pkt.first() {
+                    Some(&PKT_DISCOVER) if pkt.get(1..9) == Some(&session::DISCOVER_MAGIC[..]) => {
+                        let mut r = vec![session::PKT_DISCOVER_REPLY];
+                        r.extend_from_slice(session::DISCOVER_REPLY_MAGIC);
+                        r.extend_from_slice(hostname().as_bytes());
+                        let _ = sock.send_to(&r, from);
+                    }
                     Some(&PKT_INIT) => match session::respond(&psk, pkt, &mut last_ts) {
                         Ok((tr, resp)) => {
                             let _ = sock.send_to(&resp, from);
@@ -241,6 +247,13 @@ fn serve<S: Sink>(
             }
         }
     }
+}
+
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+        .map(|s| s.trim().chars().take(64).collect())
+        .unwrap_or_default()
 }
 
 fn send_hello<S: Sink>(sock: &UdpSocket, p: &mut Peer, st: &State<S>) {

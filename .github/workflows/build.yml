@@ -63,10 +63,19 @@ jobs:
           timeout 180 $WINE wineboot -i || true
           ./target/release/glidekm-client --passphrase ci --port 4343 --width 1280 --height 800 --dry-run > client.log 2>&1 &
           W=target/x86_64-pc-windows-gnu/release
-          timeout 60 $WINE $W/glidekm-server.exe --client 127.0.0.1:4343 --passphrase ci > server.log 2>&1 &
-          for i in $(seq 1 30); do grep -q "client online" server.log && break; sleep 1; done
+          timeout 120 $WINE $W/glidekm-server.exe --client 127.0.0.1:4343 --passphrase ci --log-file server.log --verbose &
+          for i in $(seq 1 30); do grep -q "client online" server.log 2>/dev/null && break; sleep 1; done
           timeout 60 $WINE $W/examples/inject.exe
           sleep 1
+          # Settings UI API on the real exe
+          URL=$(grep -o "http://127.0.0.1:[0-9]*/?t=[0-9a-f]*" server.log | head -1)
+          T=${URL##*t=}; B=${URL%%/?t=*}
+          test "$(curl -s -o /dev/null -w '%{http_code}' $B/api/state)" = 403
+          curl -sf -H "X-Token: $T" $B/api/state | tee state.json
+          grep -q '"status":"online"' state.json
+          curl -sf "$URL" | grep -q "Arrangement"
+          curl -sf -X POST -H "X-Token: $T" -d "side=left&offset=0" $B/api/config
+          grep -q "side = left" $W/glidekm-server.conf
           echo "--- server"; cat server.log; echo "--- client"; cat client.log
           grep -q -- "-> client at (1, 500)" server.log
           grep -q "key 35 down" client.log

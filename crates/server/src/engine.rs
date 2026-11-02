@@ -191,6 +191,35 @@ impl Engine {
         info!("<- local");
     }
 
+    /// Switch PC <-> Deck (hotkey or tray menu). Enters at the Deck's center.
+    pub fn toggle(&mut self) {
+        if self.is_remote() {
+            self.leave_at_current();
+        } else {
+            let (w, h) = self.shared.size().unwrap_or((0, 0));
+            if !self.enter((w as f64 / 2.0, h as f64 / 2.0), None) {
+                info!("switch ignored: client not connected");
+            }
+        }
+    }
+
+    /// Apply new settings from the UI. Leaves the Deck first if the
+    /// arrangement changed while it is in use.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn reconfigure(&mut self, p: crate::control::EngineParams) {
+        let moved = p.side != self.layout.side
+            || p.offset != self.layout.offset
+            || p.scale != self.layout.scale;
+        if moved && self.is_remote() {
+            self.leave_at_current();
+        }
+        self.layout.side = p.side;
+        self.layout.offset = p.offset;
+        self.layout.scale = p.scale;
+        self.hk_switch = p.hk_switch;
+        self.hk_capture = p.hk_capture;
+    }
+
     fn leave_at_current(&mut self) {
         if let Mode::Remote { pos, .. } = self.mode {
             let p = self.layout.exit_point_for(pos);
@@ -329,14 +358,7 @@ impl Engine {
         }
         if down && self.hk_switch.matches(mods_before, vk) {
             self.swallow[vki] = true;
-            if self.is_remote() {
-                self.leave_at_current();
-            } else {
-                let (w, h) = self.shared.size().unwrap_or((0, 0));
-                if !self.enter((w as f64 / 2.0, h as f64 / 2.0), None) {
-                    info!("switch hotkey ignored: client not connected");
-                }
-            }
+            self.toggle();
             return true;
         }
         if down && self.hk_capture.matches(mods_before, vk) {

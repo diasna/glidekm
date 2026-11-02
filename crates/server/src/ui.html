@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>glidekm settings</title>
+<style>
+:root {
+  --bg: #f4f5f7; --card: #ffffff; --text: #1d2127; --muted: #636b76; --line: #dfe2e7;
+  --mon: #e8ebef; --mon-line: #b9c0ca; --accent: #2563eb; --accent-soft: #dbe6fd;
+  --ok: #16a34a; --warn: #d97706; --bad: #dc2626; --idle: #8a919c; --edge: #16a34a;
+  --input: #ffffff; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171b; --card: #1e2126; --text: #e6e8eb; --muted: #9aa2ad; --line: #30353d;
+    --mon: #2a2f36; --mon-line: #4a525d; --accent: #5b8def; --accent-soft: #233559;
+    --input: #171a1e; --edge: #22c55e; --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif; }
+header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; background: var(--card);
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+.brand { font-weight: 650; font-size: 17px; letter-spacing: -.01em; display: flex; align-items: center; gap: 8px; }
+.brand svg { color: var(--accent); }
+.pill { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px;
+  background: var(--bg); border: 1px solid var(--line); font-size: 13px; max-width: 46ch;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--idle); flex: none; }
+.dot.online { background: var(--ok); } .dot.active { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.dot.connecting { background: var(--warn); animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+.spacer { flex: 1; }
+main { max-width: 1040px; margin: 0 auto; padding: 20px 24px 110px; display: grid; gap: 16px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; box-shadow: var(--shadow); }
+.card h2 { margin: 0 0 4px; font-size: 15px; font-weight: 620; }
+.sub { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } header { flex-wrap: wrap; } }
+label.f { display: block; font-size: 13px; font-weight: 560; margin: 12px 0 5px; }
+label.f:first-of-type { margin-top: 0; }
+.hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+input[type=text], input[type=password], input[type=number], select {
+  width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--input);
+  color: var(--text); font: inherit; outline: none; }
+input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.row { display: flex; gap: 8px; align-items: center; }
+.row > input, .row > select { flex: 1; min-width: 0; }
+button { font: inherit; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--card);
+  color: var(--text); cursor: pointer; white-space: nowrap; }
+button:hover:not(:disabled) { border-color: var(--mon-line); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 560; }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+button.ghost { border-color: transparent; background: transparent; color: var(--accent); padding: 7px 8px; }
+.check { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; cursor: pointer; }
+.check input { margin-top: 3px; accent-color: var(--accent); }
+.check small { display: block; color: var(--muted); font-size: 12px; }
+
+/* arrangement */
+.stage { position: relative; height: 300px; border-radius: 8px; overflow: hidden; user-select: none; touch-action: none;
+  background-color: var(--bg);
+  background-image: radial-gradient(circle, var(--line) 1px, transparent 1px); background-size: 18px 18px; }
+.mon, .deck { position: absolute; border-radius: 4px; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; text-align: center; font-size: 12px; line-height: 1.3; overflow: hidden; }
+.mon { background: var(--mon); border: 1.5px solid var(--mon-line); color: var(--muted); }
+.mon b { font-size: 18px; color: var(--text); font-weight: 600; }
+.deck { background: var(--accent-soft); border: 2px solid var(--accent); color: var(--text); cursor: grab; z-index: 2; }
+.deck.drag { cursor: grabbing; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+.deck.live { animation: glow 1.6s ease-in-out infinite; }
+@keyframes glow { 50% { box-shadow: 0 0 0 5px var(--accent-soft); } }
+.deck b { font-weight: 620; }
+.edge { position: absolute; background: var(--edge); border-radius: 2px; z-index: 3; pointer-events: none; }
+.arr-meta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 12px; }
+.arr-meta .row { flex: 0 0 auto; }
+.arr-meta select { width: 110px; } .arr-meta input { width: 110px; }
+.warnbox { color: var(--bad); font-size: 13px; }
+.okbox { color: var(--muted); font-size: 13px; }
+
+.scan-list { display: grid; gap: 6px; margin-top: 8px; }
+.scan-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 7px 10px;
+  border: 1px solid var(--line); border-radius: 6px; text-align: left; width: 100%; background: var(--input); }
+.scan-item span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.range { display: flex; gap: 12px; align-items: center; }
+.range input { flex: 1; accent-color: var(--accent); }
+.range output { min-width: 3.5em; text-align: right; font-variant-numeric: tabular-nums; font-weight: 560; }
+.hk { cursor: pointer; font-family: ui-monospace, Consolas, monospace; }
+.hk.rec { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+details.card summary { cursor: pointer; font-weight: 620; font-size: 15px; }
+pre.log { margin: 12px 0 0; max-height: 260px; overflow: auto; font: 12px/1.5 ui-monospace, Consolas, monospace;
+  background: var(--bg); border-radius: 6px; padding: 10px 12px; white-space: pre-wrap; word-break: break-all; }
+.log .w { color: var(--warn); }
+
+.bar { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line);
+  padding: 12px 24px; display: flex; justify-content: center; z-index: 6; }
+.bar-in { max-width: 1040px; width: 100%; display: flex; gap: 10px; align-items: center; }
+#msg { font-size: 13px; color: var(--muted); }
+#msg.err { color: var(--bad); } #msg.ok { color: var(--ok); }
+.path { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="13" height="10" rx="1.5"/><path d="M6 18h5M8.5 14v4"/><rect x="17" y="8" width="5" height="9" rx="1"/></svg>
+    glidekm
+  </div>
+  <div class="pill" id="pill" title=""><span class="dot" id="dot"></span><span id="status">Loading…</span></div>
+  <div class="spacer"></div>
+  <button id="switchBtn" disabled>Switch to Deck</button>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Arrangement</h2>
+    <p class="sub">Drag the Steam Deck to the side of your desktop where it physically sits. The cursor crosses where the green edge is.</p>
+    <div class="stage" id="stage"></div>
+    <div class="arr-meta">
+      <div class="row"><label for="side">Side</label>
+        <select id="side"><option>right</option><option>left</option><option>top</option><option>bottom</option></select></div>
+      <div class="row"><label for="offset">Offset</label><input id="offset" type="number" step="1"></div>
+      <div id="edgeInfo" class="okbox"></div>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Connection</h2>
+      <p class="sub">The Steam Deck running the glidekm client (Decky plugin or desktop service).</p>
+      <label class="f" for="client">Deck address</label>
+      <div class="row">
+        <input id="client" type="text" placeholder="steamdeck.local or 192.168.1.50" autocomplete="off" spellcheck="false">
+        <button id="scanBtn">Scan</button>
+      </div>
+      <div class="scan-list" id="scanList"></div>
+      <label class="f" for="pass">Passphrase</label>
+      <div class="row">
+        <input id="pass" type="password" autocomplete="new-password" spellcheck="false">
+        <button class="ghost" id="showPass" type="button">Show</button>
+        <button id="genPass" type="button">Generate</button>
+      </div>
+      <div class="hint">Enter the same passphrase on the Deck. It encrypts everything you type.</div>
+    </section>
+
+    <section class="card">
+      <h2>Behavior</h2>
+      <p class="sub">How the Deck feels while you use it.</p>
+      <label class="f" for="scale">Pointer speed on the Deck</label>
+      <div class="range"><span class="hint">faster</span><input id="scale" type="range" min="0.5" max="3" step="0.05"><span class="hint">slower</span><output id="scaleOut"></output></div>
+      <div class="hint">Windows pixels per Deck pixel. 1.0 = same speed as your monitors.</div>
+      <label class="f" for="hkSwitch">Switch PC ⇄ Deck hotkey</label>
+      <input id="hkSwitch" class="hk" type="text" readonly>
+      <label class="f" for="hkCapture">Game mouse (capture) hotkey</label>
+      <input id="hkCapture" class="hk" type="text" readonly>
+      <div class="hint">Click a field, then press the new combination. Use capture mode in games that lock the mouse.</div>
+      <label class="check"><input type="checkbox" id="ignoreInj"><span>Ignore software-injected mouse movement<small>Stops remote-desktop or macro tools from triggering edge switching.</small></span></label>
+      <label class="check" id="autoRow" hidden><input type="checkbox" id="autostart"><span>Start with Windows<small>Applies immediately. For elevated windows (Task Manager), use install-autostart.cmd instead.</small></span></label>
+    </section>
+  </div>
+
+  <details class="card" id="logBox">
+    <summary>Log</summary>
+    <pre class="log" id="log"></pre>
+  </details>
+</main>
+
+<div class="bar"><div class="bar-in">
+  <span id="msg"></span>
+  <div class="spacer"></div>
+  <span class="path" id="path"></span>
+  <button id="revertBtn" disabled>Revert</button>
+  <button id="saveBtn" class="primary" disabled>Save</button>
+</div></div>
+
+<script>
+"use strict";
+const TOKEN = "__TOKEN__";
+const $ = (id) => document.getElementById(id);
+const api = async (path, body) => {
+  const opt = { headers: { "X-Token": TOKEN } };
+  if (body !== undefined) {
+    opt.method = "POST";
+    opt.headers["Content-Type"] = "application/x-www-form-urlencoded";
+    opt.body = new URLSearchParams(body).toString();
+  }
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+};
+
+let S = null;          // last server state
+let saved = null;      // config as saved on the server
+let draft = null;      // config being edited
+let logNext = 0;
+
+function fromServer(c) {
+  return { client: c.client, pass: "", side: c.side, offset: c.offset, scale: c.scale,
+    hotkey_switch: c.hotkey_switch, hotkey_capture: c.hotkey_capture, ignore_injected: c.ignore_injected };
+}
+const dirty = () => draft && saved && JSON.stringify(draft) !== JSON.stringify(saved);
+
+function setMsg(text, kind) { const m = $("msg"); m.textContent = text || ""; m.className = kind || ""; }
+function updateBar() {
+  const d = dirty();
+  $("saveBtn").disabled = !d; $("revertBtn").disabled = !d;
+  if (d && !$("msg").classList.contains("err")) setMsg("Unsaved changes");
+  else if (!d && $("msg").textContent === "Unsaved changes") setMsg("");
+}
+
+// ---------------------------------------------------------------- form
+function fillForm() {
+  $("client").value = draft.client;
+  $("pass").value = draft.pass;
+  $("pass").placeholder = S.config.passphrase_set ? "•••••••• (unchanged)" : "required";
+  $("side").value = draft.side;
+  $("offset").value = draft.offset;
+  $("scale").value = draft.scale;
+  $("scaleOut").textContent = Number(draft.scale).toFixed(2);
+  $("hkSwitch").value = draft.hotkey_switch;
+  $("hkCapture").value = draft.hotkey_capture;
+  $("ignoreInj").checked = draft.ignore_injected;
+  drawArrangement();
+  updateBar();
+}
+const bind = (id, key, conv, ev = "input") => $(id).addEventListener(ev, (e) => {
+  draft[key] = conv(e.target); if (key === "scale") $("scaleOut").textContent = Number(draft.scale).toFixed(2);
+  drawArrangement(); updateBar();
+});
+bind("client", "client", (t) => t.value.trim());
+bind("pass", "pass", (t) => t.value);
+bind("side", "side", (t) => t.value, "change");
+bind("offset", "offset", (t) => Math.round(Number(t.value) || 0));
+bind("scale", "scale", (t) => Number(t.value));
+bind("ignoreInj", "ignore_injected", (t) => t.checked, "change");
+
+$("showPass").onclick = () => { const p = $("pass"); const show = p.type === "password"; p.type = show ? "text" : "password"; $("showPass").textContent = show ? "Hide" : "Show"; };
+$("genPass").onclick = () => {
+  const a = new Uint8Array(15); crypto.getRandomValues(a);
+  const v = btoa(String.fromCharCode(...a)).replace(/[+/=]/g, "").slice(0, 20);
+  $("pass").value = v; $("pass").type = "text"; $("showPass").textContent = "Hide"; draft.pass = v; updateBar();
+};
+
+// Hotkey recording.
+const CODE_NAMES = { Space: "space", Tab: "tab", Escape: "esc", Enter: "enter", Backspace: "backspace", ScrollLock: "scrolllock",
+  Pause: "pause", Insert: "insert", Delete: "delete", Home: "home", End: "end", PageUp: "pageup", PageDown: "pagedown",
+  ArrowLeft: "left", ArrowUp: "up", ArrowRight: "right", ArrowDown: "down", Backquote: "`" };
+function keyName(e) {
+  if (/^Key[A-Z]$/.test(e.code)) return e.code.slice(3).toLowerCase();
+  if (/^Digit[0-9]$/.test(e.code)) return e.code.slice(5);
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(e.code)) return e.code.toLowerCase();
+  return CODE_NAMES[e.code] || null;
+}
+for (const [id, key] of [["hkSwitch", "hotkey_switch"], ["hkCapture", "hotkey_capture"]]) {
+  const el = $(id);
+  el.addEventListener("focus", () => { el.classList.add("rec"); el.dataset.prev = el.value; el.value = "Press a key combination…"; });
+  el.addEventListener("blur", () => { el.classList.remove("rec"); if (el.value.endsWith("…")) el.value = el.dataset.prev; });
+  el.addEventListener("keydown", (e) => {
+    e.preventDefault();
+    if (e.key === "Escape" && !e.ctrlKey && !e.altKey && !e.shiftKey) { el.blur(); return; }
+    const mods = [e.ctrlKey && "ctrl", e.altKey && "alt", e.shiftKey && "shift", e.metaKey && "win"].filter(Boolean);
+    const k = keyName(e);
+    if (!k) { el.value = mods.length ? mods.join("+") + "+…" : "Press a key combination…"; return; }
+    if (!mods.length && !/^(f\d+|scrolllock|pause)$/.test(k)) { el.value = "Add Ctrl/Alt/Shift/Win…"; return; }
+    draft[key] = [...mods, k].join("+"); el.value = draft[key]; el.dataset.prev = draft[key]; updateBar(); el.blur();
+  });
+}
+
+// ---------------------------------------------------------------- arrangement
+function deckSize() {
+  const sz = S.client_size || [1280, 800];
+  return { w: sz[0] * draft.scale, h: sz[1] * draft.scale, known: !!S.client_size, px: sz };
+}
+function desktop(mons) {
+  return mons.reduce((a, m) => ({ l: Math.min(a.l, m[0]), t: Math.min(a.t, m[1]), r: Math.max(a.r, m[2]), b: Math.max(a.b, m[3]) }),
+    { l: Infinity, t: Infinity, r: -Infinity, b: -Infinity });
+}
+function deckRect(D, side, offset, ds) {
+  switch (side) {
+    case "right": return { x: D.r, y: D.t + offset, w: ds.w, h: ds.h };
+    case "left": return { x: D.l - ds.w, y: D.t + offset, w: ds.w, h: ds.h };
+    case "bottom": return { x: D.l + offset, y: D.b, w: ds.w, h: ds.h };
+    default: return { x: D.l + offset, y: D.t - ds.h, w: ds.w, h: ds.h };
+  }
+}
+// Segments of the shared edge (mirrors the server's crossing rule).
+function sharedEdges(mons, D, side, R) {
+  const segs = [];
+  for (const m of mons) {
+    let touches, lo, hi;
+    if (side === "right") { touches = m[2] === D.r; lo = Math.max(m[1], R.y); hi = Math.min(m[3], R.y + R.h); }
+    else if (side === "left") { touches = m[0] === D.l; lo = Math.max(m[1], R.y); hi = Math.min(m[3], R.y + R.h); }
+    else if (side === "bottom") { touches = m[3] === D.b; lo = Math.max(m[0], R.x); hi = Math.min(m[2], R.x + R.w); }
+    else { touches = m[1] === D.t; lo = Math.max(m[0], R.x); hi = Math.min(m[2], R.x + R.w); }
+    if (touches && hi > lo) segs.push([lo, hi]);
+  }
+  return segs;
+}
+
+let view = null, drag = null;
+function drawArrangement() {
+  if (!S || !draft) return;
+  const stage = $("stage");
+  const mons = S.monitors.length ? S.monitors : [[0, 0, 1920, 1080]];
+  const D = desktop(mons), ds = deckSize();
+  const R = deckRect(D, draft.side, draft.offset, ds);
+  // Fixed viewport: desktop padded by the Deck's size on every side so it never jumps while dragging.
+  const pad = Math.max(ds.w, ds.h) * 1.05;
+  const vx = D.l - pad, vy = D.t - pad, vw = D.r - D.l + 2 * pad, vh = D.b - D.t + 2 * pad;
+  const W = stage.clientWidth, H = stage.clientHeight;
+  const k = Math.min(W / vw, H / vh);
+  const ox = (W - vw * k) / 2 - vx * k, oy = (H - vh * k) / 2 - vy * k;
+  view = { k, ox, oy, D, ds, mons };
+  const px = (x) => x * k + ox, py = (y) => y * k + oy;
+  let html = "";
+  mons.forEach((m, i) => {
+    html += `<div class="mon" style="left:${px(m[0])}px;top:${py(m[1])}px;width:${(m[2] - m[0]) * k - 3}px;height:${(m[3] - m[1]) * k - 3}px">` +
+      `<b>${i + 1}</b>${m[2] - m[0]}×${m[3] - m[1]}</div>`;
+  });
+  const live = S.status === "active" ? " live" : "";
+  html += `<div class="deck${drag ? " drag" : ""}${live}" id="deck" style="left:${px(R.x)}px;top:${py(R.y)}px;width:${R.w * k}px;height:${R.h * k}px">` +
+    `<b>Steam Deck</b>${ds.px[0]}×${ds.px[1]}${ds.known ? "" : "<br><small>(assumed)</small>"}</div>`;
+  const segs = sharedEdges(mons, D, draft.side, R);
+  let total = 0;
+  for (const [lo, hi] of segs) {
+    total += hi - lo;
+    if (draft.side === "right" || draft.side === "left") {
+      const x = draft.side === "right" ? D.r : D.l;
+      html += `<div class="edge" style="left:${px(x) - 2}px;top:${py(lo)}px;width:4px;height:${(hi - lo) * k}px"></div>`;
+    } else {
+      const y = draft.side === "bottom" ? D.b : D.t;
+      html += `<div class="edge" style="left:${px(lo)}px;top:${py(y) - 2}px;width:${(hi - lo) * k}px;height:4px"></div>`;
+    }
+  }
+  stage.innerHTML = html;
+  const info = $("edgeInfo");
+  if (total <= 0) { info.className = "warnbox"; info.textContent = "The Deck doesn't touch any monitor here, so the cursor can't reach it. Drag it closer."; }
+  else { info.className = "okbox"; info.textContent = `Shared edge: ${Math.round(total)} px${ds.known ? "" : " · Deck size will update once it connects"}`; }
+  $("deck").addEventListener("pointerdown", startDrag);
+}
+
+function startDrag(e) {
+  const deck = e.currentTarget, r = deck.getBoundingClientRect();
+  drag = { gx: e.clientX - r.left, gy: e.clientY - r.top };
+  deck.setPointerCapture(e.pointerId);
+  deck.classList.add("drag");
+  deck.addEventListener("pointermove", onDrag);
+  deck.addEventListener("pointerup", endDrag, { once: true });
+  deck.addEventListener("pointercancel", endDrag, { once: true });
+}
+function onDrag(e) {
+  const st = $("stage").getBoundingClientRect(), { k, ox, oy, D, ds, mons } = view;
+  // Proposed top-left in desktop coordinates.
+  const x = (e.clientX - st.left - drag.gx - ox) / k, y = (e.clientY - st.top - drag.gy - oy) / k;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const cands = [
+    { side: "right", x: D.r, y: clamp(y, D.t - ds.h + 1, D.b - 1) },
+    { side: "left", x: D.l - ds.w, y: clamp(y, D.t - ds.h + 1, D.b - 1) },
+    { side: "bottom", y: D.b, x: clamp(x, D.l - ds.w + 1, D.r - 1) },
+    { side: "top", y: D.t - ds.h, x: clamp(x, D.l - ds.w + 1, D.r - 1) },
+  ];
+  let best = cands[0], bd = Infinity;
+  for (const c of cands) { const d = Math.hypot(c.x - x, c.y - y); if (d < bd) { bd = d; best = c; } }
+  const vertical = best.side === "left" || best.side === "right";
+  let off = vertical ? best.y - D.t : best.x - D.l;
+  // Magnet: align with monitor edges / centers touching this side.
+  const snaps = [0];
+  for (const m of mons) {
+    if (vertical && (best.side === "right" ? m[2] === D.r : m[0] === D.l))
+      snaps.push(m[1] - D.t, m[3] - D.t - ds.h, (m[1] + m[3] - ds.h) / 2 - D.t);
+    if (!vertical && (best.side === "bottom" ? m[3] === D.b : m[1] === D.t))
+      snaps.push(m[0] - D.l, m[2] - D.l - ds.w, (m[0] + m[2] - ds.w) / 2 - D.l);
+  }
+  for (const s of snaps) if (Math.abs(s - off) * k < 10) { off = s; break; }
+  draft.side = best.side; draft.offset = Math.round(off);
+  $("side").value = draft.side; $("offset").value = draft.offset;
+  drawArrangement();
+  // Re-attach the move handler to the freshly rendered element.
+  const deck = $("deck"); deck.classList.add("drag");
+  deck.setPointerCapture(e.pointerId);
+  deck.addEventListener("pointermove", onDrag);
+  deck.addEventListener("pointerup", endDrag, { once: true });
+  deck.addEventListener("pointercancel", endDrag, { once: true });
+  updateBar();
+}
+function endDrag() { drag = null; drawArrangement(); }
+window.addEventListener("resize", drawArrangement);
+
+// ---------------------------------------------------------------- status / actions
+function renderStatus() {
+  $("dot").className = "dot " + S.status;
+  $("status").textContent = S.status_text + (S.status === "active" && S.capture ? " · game mouse" : "");
+  $("pill").title = S.status_text;
+  const sw = $("switchBtn");
+  sw.disabled = !(S.status === "online" || S.status === "active");
+  sw.textContent = S.status === "active" ? "Back to PC" : "Switch to Deck";
+  $("path").textContent = S.config_path;
+  $("path").title = S.config_path;
+  if (S.autostart === null) $("autoRow").hidden = true;
+  else { $("autoRow").hidden = false; $("autostart").checked = S.autostart; }
+}
+
+async function poll() {
+  try {
+    const s = await api("/api/state");
+    const first = !S;
+    const sizeChanged = S && JSON.stringify(S.client_size) !== JSON.stringify(s.client_size);
+    const monsChanged = S && JSON.stringify(S.monitors) !== JSON.stringify(s.monitors);
+    const liveChanged = S && S.status !== s.status;
+    S = s;
+    if (first) {
+      saved = fromServer(s.config); draft = { ...saved }; fillForm();
+      if (s.status === "unconfigured") { setMsg("Enter the Deck's address and a passphrase, then Save."); $("client").focus(); }
+    } else if ((sizeChanged || monsChanged || liveChanged) && !drag) drawArrangement();
+    renderStatus();
+  } catch (e) { $("dot").className = "dot"; $("status").textContent = "Server not running"; }
+}
+async function pollLog() {
+  try {
+    const r = await api("/api/log?since=" + logNext);
+    if (r.lines.length) {
+      const pre = $("log"), atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+      for (const l of r.lines) {
+        const div = document.createElement("div");
+        div.textContent = l; if (/ WARN /.test(l)) div.className = "w";
+        pre.appendChild(div);
+      }
+      while (pre.childNodes.length > 400) pre.removeChild(pre.firstChild);
+      if (atEnd) pre.scrollTop = pre.scrollHeight;
+    }
+    logNext = r.next;
+  } catch (e) {}
+}
+
+$("saveBtn").onclick = async () => {
+  const body = { client: draft.client, side: draft.side, offset: draft.offset, scale: draft.scale,
+    hotkey_switch: draft.hotkey_switch, hotkey_capture: draft.hotkey_capture, ignore_injected: draft.ignore_injected ? "1" : "0" };
+  if (draft.pass) body.passphrase = draft.pass;
+  $("saveBtn").disabled = true;
+  try {
+    await api("/api/config", body);
+    draft.pass = ""; saved = { ...draft };
+    S = await api("/api/state"); fillForm(); renderStatus();
+    setMsg("Saved — applied immediately.", "ok");
+  } catch (e) { setMsg(e.message, "err"); updateBar(); }
+};
+$("revertBtn").onclick = () => { draft = { ...saved }; $("pass").type = "password"; setMsg(""); fillForm(); };
+$("switchBtn").onclick = () => api("/api/switch", {}).then(poll).catch((e) => setMsg(e.message, "err"));
+$("autostart").onchange = (e) => api("/api/autostart", { on: e.target.checked ? "1" : "0" })
+  .then(() => setMsg(e.target.checked ? "Will start with Windows." : "Removed from startup.", "ok"))
+  .catch((err) => { setMsg(err.message, "err"); e.target.checked = !e.target.checked; });
+$("scanBtn").onclick = async () => {
+  const b = $("scanBtn"), list = $("scanList");
+  b.disabled = true; b.textContent = "Scanning…"; list.innerHTML = "";
+  try {
+    const found = await api("/api/scan", {});
+    if (!found.length) list.innerHTML = '<div class="hint">No Deck answered. Make sure the client is running and on the same network, or type its IP.</div>';
+    for (const f of found) {
+      const btn = document.createElement("button");
+      btn.className = "scan-item"; btn.type = "button";
+      btn.innerHTML = "<b></b><span></span>";
+      btn.firstChild.textContent = f.name || "Deck"; btn.lastChild.textContent = f.addr;
+      btn.onclick = () => { draft.client = f.addr; $("client").value = f.addr; list.innerHTML = ""; updateBar(); };
+      list.appendChild(btn);
+    }
+  } catch (e) { setMsg(e.message, "err"); }
+  b.disabled = false; b.textContent = "Scan";
+};
+window.addEventListener("beforeunload", (e) => { if (dirty()) { e.preventDefault(); e.returnValue = ""; } });
+
+poll(); pollLog();
+setInterval(poll, 1000);
+setInterval(pollLog, 1500);
+</script>
+</body>
+</html>

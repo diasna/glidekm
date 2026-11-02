@@ -2,11 +2,13 @@
 //! input through the real engine and network stack. Used for end-to-end
 //! testing against a client running with --dry-run.
 
+use crate::control::Control;
 use crate::engine::{Action, Engine, Input};
 use crate::layout::{Layout, Rect};
-use crate::{net, Settings};
+use crate::Opts;
 use glidekm_core::info;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn feed_with(e: &mut Engine, cursor: &mut (i32, i32), inp: Input) {
@@ -25,26 +27,59 @@ fn feed_with(e: &mut Engine, cursor: &mut (i32, i32), inp: Input) {
     std::thread::sleep(Duration::from_millis(5));
 }
 
-pub fn run(s: Settings) -> Result<(), String> {
-    if !s.cfg.flag("simulate") {
-        return Err("glidekm-server only captures input on Windows. On other systems use --simulate for testing.".into());
+/// Parse "l,t,r,b;l,t,r,b" (for --monitors).
+fn parse_monitors(s: &str) -> Option<Vec<Rect>> {
+    s.split(';')
+        .map(|m| {
+            let v: Vec<i32> = m
+                .split(',')
+                .map(|x| x.trim().parse().ok())
+                .collect::<Option<_>>()?;
+            (v.len() == 4).then(|| Rect {
+                l: v[0],
+                t: v[1],
+                r: v[2],
+                b: v[3],
+            })
+        })
+        .collect()
+}
+
+pub fn run(ctl: Arc<Control>, opts: Opts) -> Result<(), String> {
+    let simulate = opts.flags.flag("simulate");
+    let default = if simulate {
+        "0,0,1920,1080"
+    } else {
+        "0,0,2560,1440;2560,180,4480,1260"
+    };
+    let monitors =
+        parse_monitors(&opts.flags.str_or("monitors", default)).ok_or("invalid --monitors")?;
+    *ctl.monitors.lock().unwrap() = monitors.clone();
+    let tx = crate::start_services(&ctl, &opts)?;
+    if !simulate {
+        // Headless mode (non-Windows): networking + settings UI only, for
+        // developing and testing the UI.
+        let url = ctl.ui_url.lock().unwrap().clone();
+        info!("headless mode (no input capture on this OS). Settings: {url}");
+        println!("{url}");
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        }
     }
-    let shared = net::Shared::new();
-    let tx = net::spawn(s.client.clone(), s.psk, shared.clone()).map_err(|e| e.to_string())?;
+    let shared = ctl.shared.clone();
+    let p = ctl.cfg.lock().unwrap().engine_params()?;
+    if !shared.configured() {
+        return Err("--simulate needs --client and --passphrase".into());
+    }
     let layout = Layout {
-        monitors: vec![Rect {
-            l: 0,
-            t: 0,
-            r: 1920,
-            b: 1080,
-        }],
-        side: s.side,
-        offset: s.offset,
-        scale: s.scale,
+        monitors,
+        side: p.side,
+        offset: p.offset,
+        scale: p.scale,
         client_w: 0,
         client_h: 0,
     };
-    let mut e = Engine::new(layout, tx, shared.clone(), s.hk_switch, s.hk_capture);
+    let mut e = Engine::new(layout, tx, shared.clone(), p.hk_switch, p.hk_capture);
     let mut cursor = (1800i32, 500i32);
 
     let t0 = Instant::now();

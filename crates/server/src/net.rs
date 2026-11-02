@@ -6,7 +6,7 @@ use glidekm_core::event::{encode_all, Event, KeyBitmap, KEY_BITMAP_LEN};
 use glidekm_core::session::{self, Initiator, Transport, PKT_DATA, PKT_RESP};
 use glidekm_core::{debug, info, warn};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -22,6 +22,14 @@ pub struct Shared {
     pub capture: AtomicBool,
     /// Keys/buttons currently held on the client (for heartbeats).
     pub pressed: Mutex<KeyBitmap>,
+    /// Where to connect and with which key; None = not configured yet.
+    target: Mutex<Option<(String, [u8; 32])>>,
+    /// Bumped whenever `target` changes, so the network threads reconnect.
+    gen: AtomicU64,
+    /// Resolved client address of the current attempt/session.
+    pub peer: Mutex<Option<SocketAddr>>,
+    /// Last connection problem, for status displays ("" = none).
+    pub last_error: Mutex<String>,
 }
 
 impl Shared {
@@ -32,7 +40,29 @@ impl Shared {
             active: AtomicBool::new(false),
             capture: AtomicBool::new(false),
             pressed: Mutex::new([0; KEY_BITMAP_LEN]),
+            target: Mutex::new(None),
+            gen: AtomicU64::new(0),
+            peer: Mutex::new(None),
+            last_error: Mutex::new(String::new()),
         })
+    }
+
+    /// Point the connection at a (new) client. Takes effect immediately.
+    pub fn set_target(&self, addr: &str, psk: [u8; 32]) {
+        let mut t = self.target.lock().unwrap();
+        let new = Some((addr.to_string(), psk));
+        if *t != new {
+            *t = new;
+            self.gen.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    pub fn configured(&self) -> bool {
+        self.target.lock().unwrap().is_some()
+    }
+
+    fn set_error(&self, e: &str) {
+        *self.last_error.lock().unwrap() = e.to_string();
     }
 
     pub fn size(&self) -> Option<(u16, u16)> {
@@ -48,7 +78,7 @@ struct Conn {
     last_hello: Option<Instant>,
 }
 
-pub fn spawn(target: String, psk: [u8; 32], shared: Arc<Shared>) -> std::io::Result<Sender<Event>> {
+pub fn spawn(shared: Arc<Shared>) -> std::io::Result<Sender<Event>> {
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     let rsock = sock.try_clone()?;
     let conn = Arc::new(Mutex::new(Conn {
@@ -66,7 +96,7 @@ pub fn spawn(target: String, psk: [u8; 32], shared: Arc<Shared>) -> std::io::Res
         .spawn(move || recv_loop(rsock, c, sh))?;
     std::thread::Builder::new()
         .name("net-tx".into())
-        .spawn(move || send_loop(sock, target, psk, rx, conn, shared))?;
+        .spawn(move || send_loop(sock, rx, conn, shared))?;
     Ok(tx)
 }
 
@@ -88,14 +118,7 @@ fn resolve(target: &str) -> Option<SocketAddr> {
         .copied()
 }
 
-fn send_loop(
-    sock: UdpSocket,
-    target: String,
-    psk: [u8; 32],
-    rx: Receiver<Event>,
-    conn: Arc<Mutex<Conn>>,
-    shared: Arc<Shared>,
-) {
+fn send_loop(sock: UdpSocket, rx: Receiver<Event>, conn: Arc<Mutex<Conn>>, shared: Arc<Shared>) {
     let hb = Duration::from_millis(glidekm_core::HEARTBEAT_MS);
     let timeout = Duration::from_millis(glidekm_core::CLIENT_TIMEOUT_MS);
     let mut last_hb = Instant::now() - hb;
@@ -103,6 +126,7 @@ fn send_loop(
     let mut last_ts = 0u64;
     let mut warned_resolve = false;
     let mut batch = Vec::with_capacity(32);
+    let mut my_gen = u64::MAX;
 
     loop {
         let first = match rx.recv_timeout(hb) {
@@ -119,6 +143,27 @@ fn send_loop(
                 Err(_) => break,
             }
         }
+
+        // Configuration changes: drop the session and reconnect.
+        let gen = shared.gen.load(Ordering::SeqCst);
+        if gen != my_gen {
+            my_gen = gen;
+            *conn.lock().unwrap() = Conn {
+                addr: None,
+                pending: None,
+                tr: None,
+                last_hello: None,
+            };
+            *shared.peer.lock().unwrap() = None;
+            shared.client_size.store(0, Ordering::Relaxed);
+            shared.set_error("");
+            last_init = None;
+            warned_resolve = false;
+        }
+        let Some((target, psk)) = shared.target.lock().unwrap().clone() else {
+            shared.alive.store(false, Ordering::Relaxed);
+            continue;
+        };
 
         // Liveness.
         let (tr, addr) = {
@@ -149,6 +194,7 @@ fn send_loop(
                                 c.pending = Some(ini);
                                 c.addr = Some(a);
                             }
+                            *shared.peer.lock().unwrap() = Some(a);
                             debug!("handshake -> {a}");
                             let _ = sock.send_to(&pkt, a);
                         }
@@ -156,6 +202,7 @@ fn send_loop(
                     None if !warned_resolve => {
                         warned_resolve = true;
                         warn!("cannot resolve client address '{target}', retrying");
+                        shared.set_error(&format!("cannot resolve '{target}'"));
                     }
                     None => {}
                 }
@@ -210,10 +257,14 @@ fn recv_loop(sock: UdpSocket, conn: Arc<Mutex<Conn>>, shared: Arc<Shared>) {
                     match ini.finish(pkt) {
                         Ok(tr) => {
                             info!("session established with {from}");
+                            shared.set_error("");
                             c.tr = Some(Arc::new(tr));
                             c.last_hello = None;
                         }
-                        Err(e) => warn!("handshake failed ({e}) - passphrase mismatch?"),
+                        Err(e) => {
+                            warn!("handshake failed ({e}) - passphrase mismatch?");
+                            shared.set_error("handshake failed - passphrase mismatch?");
+                        }
                     }
                 }
             }

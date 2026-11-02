@@ -16,6 +16,11 @@ use std::sync::Mutex;
 pub const PKT_INIT: u8 = 1;
 pub const PKT_RESP: u8 = 2;
 pub const PKT_DATA: u8 = 3;
+/// Unauthenticated LAN discovery: `[4]"glidekm?"` -> `[5]"glidekm!"<hostname>`.
+pub const PKT_DISCOVER: u8 = 4;
+pub const PKT_DISCOVER_REPLY: u8 = 5;
+pub const DISCOVER_MAGIC: &[u8; 8] = b"glidekm?";
+pub const DISCOVER_REPLY_MAGIC: &[u8; 8] = b"glidekm!";
 pub const MAX_PACKET: usize = 1400;
 
 const PARAMS: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
@@ -196,6 +201,14 @@ pub fn respond(
     buf.truncate(1 + m);
     *last_ts = ts;
     Ok((Transport::new(hs.into_stateless_transport_mode()?), buf))
+}
+
+/// 32 bytes from the OS random number generator.
+pub fn random_bytes() -> [u8; 32] {
+    let kp = Builder::new(params()).generate_keypair().expect("os rng");
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&kp.private[..32]);
+    out
 }
 
 pub fn now_millis() -> u64 {

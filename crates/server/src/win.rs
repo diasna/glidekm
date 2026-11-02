@@ -1,12 +1,16 @@
 //! Windows adapter: low-level hooks + Raw Input feed the engine; a hidden
-//! window runs deferred cursor actions, timers and display-change handling.
+//! window runs deferred cursor actions, timers, display-change handling, the
+//! tray icon and settings changes coming from the UI thread.
 
+use crate::control::{Control, Platform, Status};
 use crate::engine::{Action, Engine, Input};
 use crate::layout::{Layout, Rect};
-use crate::{net, Settings};
+use crate::tray::{self, Tray};
+use crate::Opts;
 use glidekm_core::{info, warn};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -18,12 +22,20 @@ use windows_sys::Win32::UI::Input::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const WM_APP_ACTIONS: u32 = WM_APP + 1;
+const WM_APP_CONFIG: u32 = WM_APP + 2;
+const WM_APP_TOGGLE: u32 = WM_APP + 3;
+const WM_APP_OPEN_UI: u32 = WM_APP + 4;
 const TIMER_TICK: usize = 1;
+const CLASS_NAME: &str = "glidekm-server";
 
 thread_local! {
     static ENGINE: RefCell<Option<Engine>> = const { RefCell::new(None) };
     static HWND_MAIN: std::cell::Cell<HWND> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+    static TRAY: RefCell<Option<Tray>> = const { RefCell::new(None) };
+    static TASKBAR_CREATED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
+
+static CONTROL: OnceLock<Arc<Control>> = OnceLock::new();
 
 static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
 /// Treat software-injected mouse moves as non-physical (config `ignore_injected`).
@@ -70,6 +82,103 @@ pub fn restore_cursor() {
     CURSOR_HIDDEN.store(false, Ordering::SeqCst);
     unsafe {
         SystemParametersInfoW(SPI_SETCURSORS, 0, std::ptr::null_mut(), 0);
+    }
+}
+
+/// Show output in the console we were started from (or a new one).
+pub fn attach_console() {
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            AllocConsole();
+        }
+    }
+}
+
+/// Hands UI-thread requests to the input thread via window messages.
+struct WinPlatform {
+    hwnd: isize,
+}
+
+impl Platform for WinPlatform {
+    fn config_changed(&self) {
+        unsafe { PostMessageW(self.hwnd as HWND, WM_APP_CONFIG, 0, 0) };
+    }
+    fn toggle_switch(&self) {
+        unsafe { PostMessageW(self.hwnd as HWND, WM_APP_TOGGLE, 0, 0) };
+    }
+    fn autostart(&self) -> Option<bool> {
+        Some(tray::autostart_enabled())
+    }
+    fn set_autostart(&self, on: bool) -> Result<(), String> {
+        tray::set_autostart(on)
+    }
+}
+
+fn ctl() -> &'static Arc<Control> {
+    CONTROL.get().expect("control initialised")
+}
+
+fn with_engine(f: impl FnOnce(&mut Engine)) {
+    ENGINE.with(|cell| {
+        if let Ok(mut g) = cell.try_borrow_mut() {
+            if let Some(e) = g.as_mut() {
+                f(e);
+            }
+        }
+    });
+}
+
+fn apply_config() {
+    let cfg = ctl().cfg.lock().unwrap().clone();
+    IGNORE_INJECTED.store(cfg.ignore_injected, Ordering::Relaxed);
+    match cfg.engine_params() {
+        Ok(p) => with_engine(|e| e.reconfigure(p)),
+        Err(e) => warn!("config not applied: {e}"),
+    }
+    run_actions();
+    update_tray();
+}
+
+fn tray_tip() -> String {
+    format!("glidekm - {}", ctl().status_text())
+}
+
+fn update_tray() {
+    let (st, tip) = (ctl().status(), tray_tip());
+    TRAY.with(|t| {
+        if let Some(t) = t.borrow_mut().as_mut() {
+            t.update(st, &tip);
+        }
+    });
+}
+
+fn open_ui() {
+    tray::open_url(&ctl().ui_url.lock().unwrap());
+}
+
+fn show_tray_menu() {
+    let st = ctl().status();
+    let cmd = TRAY.with(|t| {
+        t.borrow()
+            .as_ref()
+            .map(|t| {
+                t.menu(
+                    matches!(st, Status::Online | Status::Active),
+                    st == Status::Active,
+                )
+            })
+            .unwrap_or(0)
+    });
+    match cmd {
+        tray::ID_OPEN => open_ui(),
+        tray::ID_SWITCH => {
+            with_engine(|e| e.toggle());
+            run_actions();
+        }
+        tray::ID_QUIT => unsafe {
+            DestroyWindow(HWND_MAIN.with(|h| h.get()));
+        },
+        _ => {}
     }
 }
 
@@ -262,22 +371,54 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TIMER => {
             feed(Input::Tick);
             run_actions();
+            update_tray();
             0
         }
         WM_DISPLAYCHANGE => {
             let m = monitors();
             info!("display layout changed: {} monitor(s)", m.len());
-            ENGINE.with(|cell| {
-                if let Ok(mut g) = cell.try_borrow_mut() {
-                    if let Some(e) = g.as_mut() {
-                        e.layout.monitors = m;
-                    }
-                }
-            });
+            *ctl().monitors.lock().unwrap() = m.clone();
+            with_engine(|e| e.layout.monitors = m);
+            0
+        }
+        WM_APP_CONFIG => {
+            apply_config();
+            0
+        }
+        WM_APP_TOGGLE => {
+            with_engine(|e| e.toggle());
+            run_actions();
+            0
+        }
+        WM_APP_OPEN_UI => {
+            open_ui();
+            0
+        }
+        tray::WM_APP_TRAY => {
+            match (lparam & 0xFFFF) as u32 {
+                WM_LBUTTONUP | WM_LBUTTONDBLCLK => open_ui(),
+                WM_RBUTTONUP | WM_CONTEXTMENU => show_tray_menu(),
+                _ => {}
+            }
             0
         }
         WM_DESTROY => {
+            TRAY.with(|t| {
+                if let Some(t) = t.borrow_mut().as_mut() {
+                    t.remove();
+                }
+            });
             PostQuitMessage(0);
+            0
+        }
+        m if m != 0 && m == TASKBAR_CREATED.with(|c| c.get()) => {
+            // Explorer restarted: put the icon back.
+            let (st, tip) = (ctl().status(), tray_tip());
+            TRAY.with(|t| {
+                if let Some(t) = t.borrow_mut().as_mut() {
+                    t.add(st, &tip);
+                }
+            });
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -286,10 +427,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
 // ---------------------------------------------------------------- entry
 
-pub fn run(s: Settings) -> Result<(), String> {
+pub fn run(control: Arc<Control>, opts: Opts) -> Result<(), String> {
+    let class = wide(CLASS_NAME);
     unsafe {
-        if s.background {
-            FreeConsole();
+        // Single instance: hand over to the running one (it opens its UI).
+        let existing = FindWindowW(class.as_ptr(), std::ptr::null());
+        if !existing.is_null() {
+            PostMessageW(existing, WM_APP_OPEN_UI, 0, 0);
+            info!("already running - opening its settings");
+            return Ok(());
         }
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
@@ -303,48 +449,25 @@ pub fn run(s: Settings) -> Result<(), String> {
         prev(p)
     }));
 
-    IGNORE_INJECTED.store(s.cfg.flag("ignore_injected"), Ordering::Relaxed);
-    let shared = net::Shared::new();
-    let tx =
-        net::spawn(s.client.clone(), s.psk, shared.clone()).map_err(|e| format!("network: {e}"))?;
     let mons = monitors();
     if mons.is_empty() {
         return Err("no monitors found".into());
     }
-    let layout = Layout {
-        monitors: mons,
-        side: s.side,
-        offset: s.offset,
-        scale: s.scale,
-        client_w: 0,
-        client_h: 0,
-    };
-    info!(
-        "glidekm-server {} | client {} on the {:?} | desktop {:?}",
-        env!("CARGO_PKG_VERSION"),
-        s.client,
-        s.side,
-        layout.desktop()
-    );
-    info!(
-        "hotkeys: switch = {:?}, mouse mode = {:?}",
-        s.cfg.str_or("hotkey_switch", "ctrl+alt+shift+s"),
-        s.cfg.str_or("hotkey_capture", "ctrl+alt+shift+m")
-    );
-    ENGINE.with(|c| {
-        *c.borrow_mut() = Some(Engine::new(layout, tx, shared, s.hk_switch, s.hk_capture))
-    });
+    *control.monitors.lock().unwrap() = mons.clone();
+    let _ = CONTROL.set(control.clone());
+    let cfg = control.cfg.lock().unwrap().clone();
+    IGNORE_INJECTED.store(cfg.ignore_injected, Ordering::Relaxed);
+    let p = cfg.engine_params()?;
 
     unsafe {
         let hinst = GetModuleHandleW(std::ptr::null());
-        let class = wide("glidekm-server");
         let mut wc: WNDCLASSW = std::mem::zeroed();
         wc.lpfnWndProc = Some(wndproc);
         wc.hInstance = hinst;
         wc.lpszClassName = class.as_ptr();
         RegisterClassW(&wc);
         // A real (never shown) top-level window: message-only windows do not
-        // receive broadcasts such as WM_DISPLAYCHANGE.
+        // receive broadcasts such as WM_DISPLAYCHANGE / TaskbarCreated.
         let hwnd = CreateWindowExW(
             0,
             class.as_ptr(),
@@ -363,6 +486,41 @@ pub fn run(s: Settings) -> Result<(), String> {
             return Err("CreateWindowExW failed".into());
         }
         HWND_MAIN.with(|h| h.set(hwnd));
+        *control.platform.lock().unwrap() = Box::new(WinPlatform {
+            hwnd: hwnd as isize,
+        });
+        let tc = wide("TaskbarCreated");
+        TASKBAR_CREATED.with(|c| c.set(RegisterWindowMessageW(tc.as_ptr())));
+
+        let tx = crate::start_services(&control, &opts)?;
+        let layout = Layout {
+            monitors: mons,
+            side: p.side,
+            offset: p.offset,
+            scale: p.scale,
+            client_w: 0,
+            client_h: 0,
+        };
+        info!(
+            "glidekm-server {} | Deck {} on the {:?} | desktop {:?}",
+            env!("CARGO_PKG_VERSION"),
+            if cfg.client.is_empty() {
+                "(not set)"
+            } else {
+                &cfg.client
+            },
+            p.side,
+            layout.desktop()
+        );
+        ENGINE.with(|c| {
+            *c.borrow_mut() = Some(Engine::new(
+                layout,
+                tx,
+                control.shared.clone(),
+                p.hk_switch,
+                p.hk_capture,
+            ))
+        });
 
         let rid = RAWINPUTDEVICE {
             usUsagePage: 0x01,
@@ -380,10 +538,16 @@ pub fn run(s: Settings) -> Result<(), String> {
             return Err("failed to install input hooks".into());
         }
         SetTimer(hwnd, TIMER_TICK, 100, None);
-        info!(
-            "hooks installed; move the cursor past the {:?} edge to switch",
-            s.side
-        );
+
+        if !opts.flags.flag("no_tray") {
+            let mut t = Tray::new(hwnd);
+            t.add(control.status(), &tray_tip());
+            TRAY.with(|c| *c.borrow_mut() = Some(t));
+        }
+        info!("ready - hooks installed");
+        if !control.cfg.lock().unwrap().configured() || opts.flags.flag("open_ui") {
+            open_ui();
+        }
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
@@ -394,5 +558,6 @@ pub fn run(s: Settings) -> Result<(), String> {
         UnhookWindowsHookEx(kh);
     }
     restore_cursor();
+    info!("exiting");
     Ok(())
 }

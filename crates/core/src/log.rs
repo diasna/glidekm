@@ -1,5 +1,6 @@
 //! Minimal logger: stderr and/or an optional file. No dependencies.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +9,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static SINK: Mutex<Option<File>> = Mutex::new(None);
 static VERBOSE: AtomicBool = AtomicBool::new(false);
+/// Recent lines kept in memory for UIs: (sequence number, line).
+static RECENT: Mutex<(u64, VecDeque<(u64, String)>)> = Mutex::new((0, VecDeque::new()));
+const RECENT_MAX: usize = 300;
+
+/// Log lines with sequence number >= `since`, and the next sequence number.
+pub fn recent(since: u64) -> (Vec<(u64, String)>, u64) {
+    let g = RECENT.lock().unwrap();
+    let lines = g.1.iter().filter(|(n, _)| *n >= since).cloned().collect();
+    (lines, g.0)
+}
 
 pub fn set_file(f: File) {
     *SINK.lock().unwrap() = Some(f);
@@ -34,6 +45,14 @@ pub fn write(level: &str, msg: std::fmt::Arguments) {
         t.subsec_millis()
     );
     let _ = std::io::stderr().write_all(line.as_bytes());
+    if let Ok(mut g) = RECENT.lock() {
+        let n = g.0;
+        g.0 += 1;
+        g.1.push_back((n, line.trim_end().to_string()));
+        if g.1.len() > RECENT_MAX {
+            g.1.pop_front();
+        }
+    }
     if let Ok(mut g) = SINK.lock() {
         if let Some(f) = g.as_mut() {
             let _ = f.write_all(line.as_bytes());

@@ -40,10 +40,22 @@ Download from the [Releases](../../releases) page (or the latest CI run's artifa
 ### 1. Windows (server)
 
 1. Unzip `glidekm-windows-x86_64.zip` somewhere permanent, e.g. `C:\Tools\glidekm`.
-2. Edit `glidekm-server.conf`: set `client` (Deck IP or `steamdeck.local`), `passphrase`, and `side`.
-3. Run `glidekm-server.exe` to test (a console shows the log).
-4. Optional: right-click `install-autostart.cmd` → *Run as administrator* to start it at logon with
-   highest privileges (needed for the hooks to work while an elevated window such as Task Manager has focus).
+2. Run `glidekm-server.exe`. It lives in the notification area (tray) and, on first run, opens its
+   **settings page** in your browser:
+   - **Arrangement** - drag the Steam Deck next to your monitors, like Windows display settings.
+     The green line shows where the cursor can cross.
+   - **Connection** - *Scan* finds Decks on your network (or type the IP / `steamdeck.local`), and set a
+     passphrase (*Generate* makes one; enter the same on the Deck).
+   - **Behavior** - pointer speed on the Deck, hotkeys (click and press a combo), *Start with Windows*.
+   - *Save* applies everything immediately; the header shows live status and the *Log* section the server log.
+3. Tray icon: gray = not set up, amber = connecting, green = connected, blue = Deck in use.
+   Left-click opens settings; right-click for *Switch to Deck* / *Quit*.
+4. Optional: right-click `install-autostart.cmd` → *Run as administrator* to start at logon with
+   highest privileges (needed for the hooks to work while an elevated window such as Task Manager has
+   focus). The simpler *Start with Windows* checkbox runs it unelevated.
+
+The settings page is served only on `127.0.0.1` and needs a per-run secret that the tray link includes,
+so other websites or users cannot change your settings.
 
 ### 2a. Steam Deck - Decky Loader plugin (easiest, works in Game Mode)
 
@@ -69,7 +81,8 @@ If `/dev/uinput` is not accessible to your user, the script installs a one-line 
 
 ## Configuration
 
-`glidekm-server.conf` (next to the exe; every key can also be passed as `--key value`):
+Normally you use the settings page. It writes `glidekm-server.conf` next to the exe, which you can also
+edit by hand (every key can be passed as `--key value` too; see `glidekm-server.conf.example`):
 
 | key | default | meaning |
 |---|---|---|
@@ -80,7 +93,9 @@ If `/dev/uinput` is not accessible to your user, the script installs a one-line 
 | `scale` | `1.0` | Windows px per Deck px (>1 = slower cursor on the Deck) |
 | `hotkey_switch` | `ctrl+alt+shift+s` | jump to/from the Deck |
 | `hotkey_capture` | `ctrl+alt+shift+m` | toggle game (relative) mouse mode |
-| `log_file`, `verbose`, `background` | | logging / detach console |
+| `log_file`, `verbose` | `glidekm-server.log` next to the exe | logging |
+
+Command-line only: `--ui-port N` (default 24242), `--no-ui`, `--no-tray`, `--open-ui`, `--console` (show log in a console).
 | `ignore_injected` | `false` | don't let software-injected moves trigger edge switching |
 
 Crossing only happens where a Windows monitor actually touches the Deck's
@@ -92,7 +107,7 @@ panel's rotation and docked external displays are handled automatically).
 
 ## Troubleshooting
 
-- **Nothing happens at the edge**: check the server log says `client online`. Both sides need the same passphrase;
+- **Nothing happens at the edge**: the tray icon must be green (check the status/log on the settings page). Both sides need the same passphrase;
   a mismatch logs `handshake failed`. UDP 4242 must be reachable on the Deck.
 - **Cursor lands on the wrong spot on the Deck when docked with two displays (Desktop Mode)**: set `width`/`height`
   on the client to the combined desktop size.
@@ -115,6 +130,7 @@ Testing without hardware:
 ```bash
 glidekm-client --passphrase x --dry-run          # logs instead of injecting
 glidekm-server --simulate --client 127.0.0.1 --passphrase x   # (non-Windows) scripted input
+glidekm-server                                   # (non-Windows) headless: settings UI + networking only
 ```
 
 CI also runs the real Windows binary under Wine, driving its hooks with `SendInput` (`crates/server/examples/inject.rs`).
@@ -124,7 +140,8 @@ CI also runs the real Windows binary under Wine, driving its hooks with `SendInp
 ```
 crates/core     wire format, Windows->evdev keymap, Noise session, config, logging
 crates/client   uinput devices, screen detection, client state machine
-crates/server   engine (platform independent state machine), layout math, networking, Windows hooks
+crates/server   engine (platform independent state machine), layout math, networking, Windows hooks,
+                tray icon, settings UI (ui.rs + embedded ui.html)
 decky/          Decky Loader plugin (Python backend + React panel)
 dist/           install scripts and example configs
 ```
