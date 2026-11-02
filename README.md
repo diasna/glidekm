@@ -74,10 +74,22 @@ In Desktop Mode open Konsole:
 tar xzf glidekm-steamos-x86_64.tar.gz && cd glidekm-steamos && ./install.sh
 ```
 
-This installs `~/.local/bin/glidekm-client`, writes `~/.config/glidekm/client.conf`,
-and enables a systemd **user** service, so it also runs after you switch back to Game Mode.
-If `/dev/uinput` is not accessible to your user, the script installs a one-line udev rule
+This installs `~/.local/bin/glidekm-client`, a systemd **user** service (so it keeps running after you
+switch back to Game Mode) and a **glidekm Settings** entry in the app menu, then opens the settings page:
+
+- **This Deck** - the address to enter on the PC (with a Copy button), plus `hostname.local`.
+- **Status** - live: connected PC, input access, screen size, network. If the virtual mouse/keyboard
+  can't be created, it shows the one-line fix to paste into Konsole (glidekm retries automatically).
+  It also tells you when a PC tried to connect with a different passphrase.
+- **Settings** - passphrase (or *Generate*), UDP port, automatic or manual screen size, *Start automatically*.
+  *Save* applies immediately.
+
+The page opens in your default browser, or in Steam's built-in browser if none is installed (SteamOS
+has none by default). If `/dev/uinput` is not accessible, the script installs a one-line udev rule
 (needs `sudo`; set a password first with `passwd`). Uninstall with `./install.sh --uninstall`.
+
+Use either the Decky plugin or the Desktop Mode service, not both - they would compete for the same port
+(the settings page says so if it happens).
 
 ## Configuration
 
@@ -101,9 +113,10 @@ Command-line only: `--ui-port N` (default 24242), `--no-ui`, `--no-tray`, `--ope
 Crossing only happens where a Windows monitor actually touches the Deck's
 edge, like a real monitor arrangement; elsewhere the edge is a wall.
 
-`~/.config/glidekm/client.conf`: `passphrase`, `port` (4242), and optional
-`width`/`height` to override the auto-detected logical screen size (the Deck
-panel's rotation and docked external displays are handled automatically).
+`~/.config/glidekm/client.conf` (written by the Deck's settings page): `passphrase`, `port` (4242), and
+optional `width`/`height` to override the auto-detected logical screen size (the Deck panel's rotation
+and docked external displays are handled automatically). Command line: `--open-settings`, `--ui-port N`
+(default 24243), `--no-ui`, `--dry-run`, `--verbose`.
 
 ## Troubleshooting
 
@@ -138,8 +151,8 @@ CI also runs the real Windows binary under Wine, driving its hooks with `SendInp
 ## Layout
 
 ```
-crates/core     wire format, Windows->evdev keymap, Noise session, config, logging
-crates/client   uinput devices, screen detection, client state machine
+crates/core     wire format, Windows->evdev keymap, Noise session, config, logging, loopback HTTP for settings pages
+crates/client   uinput devices, screen detection, client state machine, Desktop Mode settings page
 crates/server   engine (platform independent state machine), layout math, networking, Windows hooks,
                 tray icon, settings UI (ui.rs + embedded ui.html)
 decky/          Decky Loader plugin (Python backend + React panel)

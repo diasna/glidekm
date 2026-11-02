@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod event;
+pub mod http;
 pub mod keymap;
 pub mod log;
 pub mod session;

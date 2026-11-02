@@ -64,7 +64,7 @@ class Plugin:
             pass
         logf = open(LOG, "ab")
         self.proc = await asyncio.create_subprocess_exec(
-            BIN, "--config", CONFIG, "--status-file", STATUS,
+            BIN, "--config", CONFIG, "--status-file", STATUS, "--no-ui",
             stdout=logf, stderr=logf, stdin=asyncio.subprocess.DEVNULL,
         )
         self.error = ""

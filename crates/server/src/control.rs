@@ -174,10 +174,7 @@ pub enum Status {
 
 impl Control {
     pub fn new(path: PathBuf, cfg: ServerConfig, shared: Arc<Shared>) -> Arc<Control> {
-        let token: String = glidekm_core::session::random_bytes()[..16]
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let token = glidekm_core::http::new_token();
         let c = Arc::new(Control {
             path,
             cfg: Mutex::new(cfg),

@@ -1,14 +1,12 @@
-//! Local settings UI: a tiny HTTP server on 127.0.0.1 serving one embedded
-//! page plus a JSON API. Every API call needs the per-run token (sent by the
-//! page as `X-Token`), and the Host header must be loopback, so other web
-//! pages and DNS-rebinding tricks cannot reconfigure the server.
+//! Server settings UI: the embedded page plus its JSON API, served by
+//! `glidekm_core::http` on 127.0.0.1 (token + Host checks live there).
 
 use crate::control::{side_name, Control, ServerConfig, Status};
 use crate::layout::Side;
+use glidekm_core::http::{self, js, Request, Response};
 use glidekm_core::{debug, info, warn};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::UdpSocket;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,190 +16,53 @@ pub const DEFAULT_UI_PORT: u16 = 24242;
 
 /// Start the UI server; returns the URL to open (includes the token).
 pub fn spawn(ctl: Arc<Control>, port: u16) -> std::io::Result<String> {
-    let listener =
-        TcpListener::bind(("127.0.0.1", port)).or_else(|_| TcpListener::bind(("127.0.0.1", 0)))?;
-    let port = listener.local_addr()?.port();
-    let url = format!("http://127.0.0.1:{port}/?t={}", ctl.token);
+    let c = ctl.clone();
+    let port = http::spawn(
+        port,
+        ctl.token.clone(),
+        PAGE,
+        Arc::new(move |r: &Request| api(&c, r)),
+    )?;
+    let url = http::url(port, &ctl.token);
     *ctl.ui_url.lock().unwrap() = url.clone();
-    std::thread::Builder::new()
-        .name("ui".into())
-        .spawn(move || {
-            for stream in listener.incoming().flatten() {
-                let ctl = ctl.clone();
-                // Short-lived connections; a thread each keeps a slow scan from
-                // blocking status polling.
-                let _ = std::thread::Builder::new()
-                    .name("ui-conn".into())
-                    .spawn(move || {
-                        if let Err(e) = handle(stream, &ctl, port) {
-                            debug!("ui: {e}");
-                        }
-                    });
-            }
-        })?;
     info!("settings UI on http://127.0.0.1:{port}/");
     Ok(url)
 }
 
-struct Request {
-    method: String,
-    path: String,
-    query: HashMap<String, String>,
-    headers: HashMap<String, String>,
-    body: String,
-}
-
-fn read_request(stream: &TcpStream) -> std::io::Result<Request> {
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let mut r = BufReader::new(stream);
-    let mut line = String::new();
-    r.read_line(&mut line)?;
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
-    let target = parts.next().unwrap_or("/").to_string();
-    let mut headers = HashMap::new();
-    loop {
-        let mut h = String::new();
-        if r.read_line(&mut h)? == 0 || h.trim().is_empty() {
-            break;
-        }
-        if headers.len() > 64 {
-            return Err(std::io::Error::other("too many headers"));
-        }
-        if let Some((k, v)) = h.split_once(':') {
-            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
-        }
-    }
-    let len: usize = headers
-        .get("content-length")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    if len > 16 * 1024 {
-        return Err(std::io::Error::other("body too large"));
-    }
-    let mut body = vec![0u8; len];
-    r.read_exact(&mut body)?;
-    let (path, q) = target.split_once('?').unwrap_or((&target, ""));
-    Ok(Request {
-        method,
-        path: path.to_string(),
-        query: parse_form(q),
-        headers,
-        body: String::from_utf8_lossy(&body).into_owned(),
-    })
-}
-
-fn respond(mut s: &TcpStream, code: u16, ctype: &str, body: &str) -> std::io::Result<()> {
-    let reason = match code {
-        200 => "OK",
-        400 => "Bad Request",
-        403 => "Forbidden",
-        404 => "Not Found",
-        _ => "Error",
-    };
-    write!(
-        s,
-        "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n\
-         Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\
-         Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
-         connect-src 'self'; img-src data:; frame-ancestors 'none'\r\nConnection: close\r\n\r\n",
-        body.len()
-    )?;
-    s.write_all(body.as_bytes())?;
-    s.flush()
-}
-
-fn json_err(s: &TcpStream, code: u16, msg: &str) -> std::io::Result<()> {
-    respond(
-        s,
-        code,
-        "application/json",
-        &format!("{{\"error\":{}}}", js(msg)),
-    )
-}
-
-fn handle(stream: TcpStream, ctl: &Control, port: u16) -> std::io::Result<()> {
-    let req = read_request(&stream)?;
-    let host = req.headers.get("host").map(|h| h.as_str()).unwrap_or("");
-    if host != format!("127.0.0.1:{port}") && host != format!("localhost:{port}") {
-        return respond(&stream, 403, "text/plain", "forbidden");
-    }
-    if req.method == "GET" && req.path == "/" {
-        if req.query.get("t").map(|t| t.as_str()) != Some(ctl.token.as_str()) {
-            return respond(
-                &stream,
-                403,
-                "text/html; charset=utf-8",
-                "<!doctype html><meta charset=utf-8><title>glidekm</title>\
-                 <p style='font:16px system-ui;margin:3em'>Open the settings from the glidekm tray icon \
-                 (this link expired when the server restarted).</p>",
-            );
-        }
-        return respond(
-            &stream,
-            200,
-            "text/html; charset=utf-8",
-            &PAGE.replace("__TOKEN__", &ctl.token),
-        );
-    }
-    if !req.path.starts_with("/api/") {
-        return respond(&stream, 404, "text/plain", "not found");
-    }
-    if req.headers.get("x-token").map(|t| t.as_str()) != Some(ctl.token.as_str()) {
-        return json_err(&stream, 403, "bad token");
-    }
+fn api(ctl: &Control, req: &Request) -> Response {
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/api/state") => respond(&stream, 200, "application/json", &state_json(ctl)),
-        ("GET", "/api/log") => {
-            let since = req
-                .query
+        ("GET", "/api/state") => Response::json(state_json(ctl)),
+        ("GET", "/api/log") => Response::json(http::log_json(
+            req.query
                 .get("since")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            let (lines, next) = glidekm_core::log::recent(since);
-            let arr: Vec<String> = lines.iter().map(|(_, l)| js(l)).collect();
-            respond(
-                &stream,
-                200,
-                "application/json",
-                &format!("{{\"next\":{next},\"lines\":[{}]}}", arr.join(",")),
-            )
-        }
+                .unwrap_or(0),
+        )),
         ("POST", "/api/config") => {
-            let f = parse_form(&req.body);
-            match config_from_form(ctl, &f).and_then(|c| ctl.apply(c)) {
-                Ok(()) => respond(&stream, 200, "application/json", "{\"ok\":true}"),
-                Err(e) => json_err(&stream, 400, &e),
+            match config_from_form(ctl, &req.form()).and_then(|c| ctl.apply(c)) {
+                Ok(()) => Response::ok(),
+                Err(e) => Response::err(400, &e),
             }
         }
         ("POST", "/api/autostart") => {
-            let on = parse_form(&req.body)
-                .get("on")
-                .map(|v| v == "1")
-                .unwrap_or(false);
+            let on = req.form().get("on").is_some_and(|v| v == "1");
             match ctl.platform.lock().unwrap().set_autostart(on) {
-                Ok(()) => respond(&stream, 200, "application/json", "{\"ok\":true}"),
-                Err(e) => json_err(&stream, 400, &e),
+                Ok(()) => Response::ok(),
+                Err(e) => Response::err(400, &e),
             }
         }
         ("POST", "/api/switch") => {
             ctl.platform.lock().unwrap().toggle_switch();
-            respond(&stream, 200, "application/json", "{\"ok\":true}")
+            Response::ok()
         }
         ("POST", "/api/scan") => {
-            let found = scan(ctl);
-            let items: Vec<String> = found
+            let items: Vec<String> = scan(ctl)
                 .iter()
                 .map(|(a, n)| format!("{{\"addr\":{},\"name\":{}}}", js(a), js(n)))
                 .collect();
-            respond(
-                &stream,
-                200,
-                "application/json",
-                &format!("[{}]", items.join(",")),
-            )
+            Response::json(format!("[{}]", items.join(",")))
         }
-        _ => json_err(&stream, 404, "unknown endpoint"),
+        _ => Response::err(404, "unknown endpoint"),
     }
 }
 
@@ -367,68 +228,4 @@ fn scan(ctl: &Control) -> Vec<(String, String)> {
         );
     }
     found
-}
-
-/// application/x-www-form-urlencoded / query string decoding.
-pub fn parse_form(s: &str) -> HashMap<String, String> {
-    s.split('&')
-        .filter(|p| !p.is_empty())
-        .filter_map(|p| {
-            let (k, v) = p.split_once('=').unwrap_or((p, ""));
-            Some((decode(k)?, decode(v)?))
-        })
-        .collect()
-}
-
-fn decode(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'+' => out.push(b' '),
-            b'%' => {
-                let h = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
-                out.push(u8::from_str_radix(h, 16).ok()?);
-                i += 2;
-            }
-            c => out.push(c),
-        }
-        i += 1;
-    }
-    String::from_utf8(out).ok()
-}
-
-/// JSON string literal.
-pub fn js(s: &str) -> String {
-    let mut o = String::with_capacity(s.len() + 2);
-    o.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => o.push_str("\\\""),
-            '\\' => o.push_str("\\\\"),
-            '\n' => o.push_str("\\n"),
-            '\r' => o.push_str("\\r"),
-            '\t' => o.push_str("\\t"),
-            '<' => o.push_str("\\u003c"),
-            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
-            c => o.push(c),
-        }
-    }
-    o.push('"');
-    o
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn form_and_json() {
-        let f = parse_form("a=1&b=hello+w%C3%B6rld&c=%3D%26&d");
-        assert_eq!(f["b"], "hello wörld");
-        assert_eq!(f["c"], "=&");
-        assert_eq!(f["d"], "");
-        assert!(parse_form("x=%zz").is_empty());
-        assert_eq!(js("a\"b\\c\n</script>"), r#""a\"b\\c\n\u003c/script>""#);
-    }
 }

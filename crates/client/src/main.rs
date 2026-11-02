@@ -2,23 +2,29 @@
 //! /dev/uinput. Works in SteamOS Game Mode (gamescope) and Desktop Mode.
 
 mod screen;
+mod settings;
 mod sink;
 mod state;
+mod ui;
 mod uinput;
 
 use glidekm_core::config::Config;
 use glidekm_core::event::{encode_all, Event};
 use glidekm_core::session::{self, Transport, PKT_DATA, PKT_DISCOVER, PKT_INIT};
 use glidekm_core::{debug, info, warn};
-use sink::{Recorder, Sink};
+use settings::{ClientConfig, Hub};
+use sink::{Output, Recorder, RetryUinput, Sink};
 use state::State;
 use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const USAGE: &str =
     "glidekm-client [--config FILE] [--passphrase P] [--port N] [--width W --height H]
-                [--status-file FILE] [--dry-run] [--verbose]
+                [--status-file FILE] [--ui-port N] [--no-ui] [--dry-run] [--verbose]
+glidekm-client --open-settings     open the settings page (starts the client if needed)
 Config file default: $XDG_CONFIG_HOME/glidekm/client.conf (~/.config/glidekm/client.conf)";
 
 fn default_config_path() -> PathBuf {
@@ -46,74 +52,113 @@ fn run() -> Result<(), String> {
         println!("glidekm-client {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    let mut cli = Config::default();
-    cli.apply_args(&args);
-    let path = cli
+    let mut flags = Config::default();
+    flags.apply_args(&args);
+    if flags.flag("open_settings") {
+        return ui::open_settings();
+    }
+    glidekm_core::log::set_verbose(flags.flag("verbose"));
+
+    let path = flags
         .get("config")
         .map(PathBuf::from)
         .unwrap_or_else(default_config_path);
-    let mut cfg = match Config::load(&path) {
+    let mut file = match Config::load(&path) {
         Ok(c) => {
             info!("config: {}", path.display());
             c
         }
-        Err(_) => Config::default(),
-    };
-    cfg.apply_args(&args);
-    glidekm_core::log::set_verbose(cfg.flag("verbose"));
-
-    let pass = cfg
-        .get("passphrase")
-        .ok_or("no passphrase set (config 'passphrase = ...' or --passphrase)")?;
-    let psk = session::derive_psk(pass);
-    let port = cfg
-        .num::<u16>("port")?
-        .unwrap_or(glidekm_core::DEFAULT_PORT);
-    let fixed = match (cfg.num::<u16>("width")?, cfg.num::<u16>("height")?) {
-        (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
-        _ => None,
-    };
-    let (w, h) = fixed.or_else(screen::detect).unwrap_or((1280, 800));
-    info!(
-        "screen {w}x{h}{}",
-        if fixed.is_some() {
-            " (from config)"
-        } else {
-            ""
+        Err(_) => {
+            info!("no config yet at {}", path.display());
+            Config::default()
         }
-    );
-    let status_file = cfg.get("status_file").map(PathBuf::from);
+    };
+    file.apply_args(&args);
+    let cfg = ClientConfig::from_config(&file).unwrap_or_else(|e| {
+        warn!("config: {e} - using defaults");
+        ClientConfig::default()
+    });
+    if cfg.passphrase.is_empty() {
+        warn!("no passphrase set - open the settings page (menu: glidekm Settings) to set one");
+    }
+    let hub = Arc::new(Hub::new(path, cfg));
+    if !flags.flag("no_ui") {
+        let port = flags.num::<u16>("ui_port")?.unwrap_or(ui::DEFAULT_UI_PORT);
+        match ui::spawn(hub.clone(), port) {
+            Ok(url) => debug!("settings url: {url}"),
+            Err(e) => warn!("settings page unavailable: {e}"),
+        }
+    }
+    let status_file = flags.get("status_file").map(PathBuf::from);
 
-    let sock = UdpSocket::bind(("0.0.0.0", port)).map_err(|e| format!("bind udp {port}: {e}"))?;
-    sock.set_read_timeout(Some(Duration::from_millis(100))).ok();
-    info!("listening on udp {port}");
-
-    if cfg.flag("dry_run") {
-        let rec = Recorder {
+    let out = if flags.flag("dry_run") {
+        Output::Dry(Recorder {
             echo: true,
             ..Default::default()
-        };
-        serve(
-            sock,
-            psk,
-            State::new(rec, w, h),
-            fixed.is_none(),
-            status_file,
-        )
+        })
     } else {
-        let sink = sink::Uinput::new().map_err(|e| {
-            format!(
-                "cannot create uinput devices: {e}\n  check /dev/uinput access (see README: udev rule or run as root)"
-            )
-        })?;
-        info!("uinput devices created");
+        Output::Real(RetryUinput::new())
+    };
+    let mut st = State::new(out, 1280, 800);
+
+    // Each iteration (re)applies the configuration; `serve` returns when the
+    // settings page saved new values.
+    loop {
+        hub.reload.store(false, Ordering::SeqCst);
+        let cfg = hub.cfg.lock().unwrap().clone();
+        let fixed = cfg.fixed_size();
+        let (w, h) = fixed.or_else(screen::detect).unwrap_or((1280, 800));
+        st.deactivate();
+        st.width = w;
+        st.height = h;
+        info!(
+            "screen {w}x{h}{}",
+            if fixed.is_some() {
+                " (from config)"
+            } else {
+                ""
+            }
+        );
+        let psk = (!cfg.passphrase.is_empty()).then(|| session::derive_psk(&cfg.passphrase));
+        let sock = match UdpSocket::bind(("0.0.0.0", cfg.port)) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!(
+                    "cannot listen on UDP {}: {e} (is another glidekm client, e.g. the Decky plugin, running?)",
+                    cfg.port
+                );
+                warn!("{msg}");
+                {
+                    let mut s = hub.snap.lock().unwrap();
+                    s.net_error = msg;
+                    s.listening = false;
+                }
+                // Retry, but react to new settings right away.
+                for _ in 0..20 {
+                    if hub.reload.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                continue;
+            }
+        };
+        sock.set_read_timeout(Some(Duration::from_millis(100))).ok();
+        info!("listening on udp {}", cfg.port);
+        {
+            let mut s = hub.snap.lock().unwrap();
+            s.net_error.clear();
+            s.listening = true;
+        }
         serve(
-            sock,
+            &sock,
             psk,
-            State::new(sink, w, h),
+            &mut st,
             fixed.is_none(),
-            status_file,
-        )
+            status_file.as_ref(),
+            &hub,
+        );
+        info!("applying new settings");
     }
 }
 
@@ -124,20 +169,23 @@ struct Peer {
     last_hello: Option<Instant>,
 }
 
-fn serve<S: Sink>(
-    sock: UdpSocket,
-    psk: [u8; 32],
-    mut st: State<S>,
+fn serve(
+    sock: &UdpSocket,
+    psk: Option<[u8; 32]>,
+    st: &mut State<Output>,
     autodetect: bool,
-    status_file: Option<PathBuf>,
-) -> Result<(), String> {
+    status_file: Option<&PathBuf>,
+    hub: &Hub,
+) {
     let mut peer: Option<Peer> = None;
     let mut last_ts = 0u64;
     let mut buf = vec![0u8; 2048];
     let mut last_detect = Instant::now();
+    let mut last_publish = Instant::now() - Duration::from_secs(1);
     let mut status = String::new();
+    let mut rejected = String::new();
 
-    loop {
+    while !hub.reload.load(Ordering::SeqCst) {
         match sock.recv_from(&mut buf) {
             Ok((n, from)) => {
                 let pkt = &buf[..n];
@@ -148,25 +196,42 @@ fn serve<S: Sink>(
                         r.extend_from_slice(hostname().as_bytes());
                         let _ = sock.send_to(&r, from);
                     }
-                    Some(&PKT_INIT) => match session::respond(&psk, pkt, &mut last_ts) {
-                        Ok((tr, resp)) => {
-                            let _ = sock.send_to(&resp, from);
-                            if peer.as_ref().map(|p| p.addr) != Some(from) {
-                                info!("server connected: {from}");
-                            } else {
-                                debug!("session renewed with {from}");
+                    Some(&PKT_INIT) => {
+                        let Some(psk) = psk.as_ref() else {
+                            rejected = format!(
+                                "{} tried to connect, but no passphrase is set here",
+                                from.ip()
+                            );
+                            continue;
+                        };
+                        match session::respond(psk, pkt, &mut last_ts) {
+                            Ok((tr, resp)) => {
+                                let _ = sock.send_to(&resp, from);
+                                if peer.as_ref().map(|p| p.addr) != Some(from) {
+                                    info!("server connected: {from}");
+                                } else {
+                                    debug!("session renewed with {from}");
+                                }
+                                rejected.clear();
+                                st.deactivate();
+                                peer = Some(Peer {
+                                    addr: from,
+                                    tr,
+                                    last_rx: Instant::now(),
+                                    last_hello: None,
+                                });
+                                send_hello(sock, peer.as_mut().unwrap(), st);
                             }
-                            st.deactivate();
-                            peer = Some(Peer {
-                                addr: from,
-                                tr,
-                                last_rx: Instant::now(),
-                                last_hello: None,
-                            });
-                            send_hello(&sock, peer.as_mut().unwrap(), &st);
+                            Err(session::Error::Replay) => debug!("stale handshake from {from}"),
+                            Err(e) => {
+                                debug!("rejected handshake from {from}: {e}");
+                                rejected = format!(
+                                    "{} tried to connect with a different passphrase",
+                                    from.ip()
+                                );
+                            }
                         }
-                        Err(e) => debug!("rejected handshake from {from}: {e}"),
-                    },
+                    }
                     Some(&PKT_DATA) => {
                         let Some(p) = peer.as_mut().filter(|p| p.addr == from) else {
                             continue;
@@ -176,8 +241,11 @@ fn serve<S: Sink>(
                                 p.last_rx = Instant::now();
                                 let mut heartbeat = false;
                                 for ev in Event::decode_all(&plain) {
-                                    debug!("rx {ev:?}");
-                                    heartbeat |= matches!(ev, Event::Heartbeat { .. });
+                                    if matches!(ev, Event::Heartbeat { .. }) {
+                                        heartbeat = true;
+                                    } else {
+                                        debug!("rx {ev:?}");
+                                    }
                                     st.handle(ev);
                                 }
                                 st.sink.flush();
@@ -185,7 +253,7 @@ fn serve<S: Sink>(
                                     && p.last_hello
                                         .is_none_or(|t| t.elapsed() >= Duration::from_millis(500))
                                 {
-                                    send_hello(&sock, p, &st);
+                                    send_hello(sock, p, st);
                                 }
                             }
                             Err(e) => debug!("drop packet: {e}"),
@@ -225,31 +293,47 @@ fn serve<S: Sink>(
                     st.width = w;
                     st.height = h;
                     if let Some(p) = peer.as_mut() {
-                        send_hello(&sock, p, &st);
+                        send_hello(sock, p, st);
                     }
                 }
             }
         }
 
-        if let Some(path) = &status_file {
-            let s = format!(
-                "{{\"connected\":{},\"server\":\"{}\",\"active\":{},\"capture\":{},\"width\":{},\"height\":{}}}\n",
-                peer.is_some(),
-                peer.as_ref().map(|p| p.addr.to_string()).unwrap_or_default(),
-                st.active,
-                st.capture,
-                st.width,
-                st.height
-            );
-            if s != status {
-                let _ = std::fs::write(path, &s);
-                status = s;
+        // Publish state for the settings page / Decky (at most 10x per second).
+        if last_publish.elapsed() >= Duration::from_millis(100) {
+            last_publish = Instant::now();
+            st.sink.tick();
+            {
+                let mut s = hub.snap.lock().unwrap();
+                s.server = peer.as_ref().map(|p| p.addr.to_string());
+                s.active = st.active;
+                s.capture = st.capture;
+                s.width = st.width;
+                s.height = st.height;
+                s.input_error = st.sink.error().to_string();
+                s.last_rejected = rejected.clone();
+            }
+            if let Some(path) = status_file {
+                let s = format!(
+                    "{{\"connected\":{},\"server\":\"{}\",\"active\":{},\"capture\":{},\"width\":{},\"height\":{},\"input_error\":{}}}\n",
+                    peer.is_some(),
+                    peer.as_ref().map(|p| p.addr.to_string()).unwrap_or_default(),
+                    st.active,
+                    st.capture,
+                    st.width,
+                    st.height,
+                    glidekm_core::http::js(st.sink.error())
+                );
+                if s != status {
+                    let _ = std::fs::write(path, &s);
+                    status = s;
+                }
             }
         }
     }
 }
 
-fn hostname() -> String {
+pub fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .or_else(|_| std::fs::read_to_string("/etc/hostname"))
         .map(|s| s.trim().chars().take(64).collect())

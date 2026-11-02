@@ -160,3 +160,125 @@ impl Sink for Recorder {
     }
     fn flush(&mut self) {}
 }
+
+/// Real devices that keep retrying until /dev/uinput becomes accessible
+/// (e.g. after the udev rule is installed), instead of exiting.
+pub struct RetryUinput {
+    dev: Option<Uinput>,
+    last_try: Option<std::time::Instant>,
+    pub error: String,
+}
+
+impl RetryUinput {
+    pub fn new() -> Self {
+        let mut s = RetryUinput {
+            dev: None,
+            last_try: None,
+            error: String::new(),
+        };
+        s.tick();
+        s
+    }
+
+    /// Try to (re)create the devices at most every 5 s while missing.
+    pub fn tick(&mut self) {
+        if self.dev.is_some()
+            || self
+                .last_try
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(5))
+        {
+            return;
+        }
+        self.last_try = Some(std::time::Instant::now());
+        match Uinput::new() {
+            Ok(d) => {
+                glidekm_core::info!("uinput devices created");
+                self.dev = Some(d);
+                self.error.clear();
+            }
+            Err(e) => {
+                let msg = format!("cannot open /dev/uinput: {e}");
+                if msg != self.error {
+                    glidekm_core::warn!(
+                        "{msg} (retrying every 5 s; see settings page for the fix)"
+                    );
+                }
+                self.error = msg;
+            }
+        }
+    }
+}
+
+macro_rules! fwd {
+    ($self:ident, $m:ident ( $($a:expr),* )) => {
+        if let Some(d) = $self.dev.as_mut() { d.$m($($a),*) }
+    };
+}
+
+impl Sink for RetryUinput {
+    fn key(&mut self, code: u16, down: bool) {
+        fwd!(self, key(code, down))
+    }
+    fn button(&mut self, capture: bool, code: u16, down: bool) {
+        fwd!(self, button(capture, code, down))
+    }
+    fn wheel(&mut self, capture: bool, horizontal: bool, v120: i32) {
+        fwd!(self, wheel(capture, horizontal, v120))
+    }
+    fn move_abs(&mut self, x: i32, y: i32) {
+        fwd!(self, move_abs(x, y))
+    }
+    fn move_rel(&mut self, dx: i32, dy: i32) {
+        fwd!(self, move_rel(dx, dy))
+    }
+    fn flush(&mut self) {
+        fwd!(self, flush())
+    }
+}
+
+/// The sink actually used by the client: real devices or a dry-run logger.
+pub enum Output {
+    Real(RetryUinput),
+    Dry(Recorder),
+}
+
+impl Output {
+    pub fn tick(&mut self) {
+        if let Output::Real(r) = self {
+            r.tick()
+        }
+    }
+    pub fn error(&self) -> &str {
+        match self {
+            Output::Real(r) => &r.error,
+            Output::Dry(_) => "",
+        }
+    }
+    fn inner(&mut self) -> &mut dyn Sink {
+        match self {
+            Output::Real(r) => r,
+            Output::Dry(d) => d,
+        }
+    }
+}
+
+impl Sink for Output {
+    fn key(&mut self, code: u16, down: bool) {
+        self.inner().key(code, down)
+    }
+    fn button(&mut self, capture: bool, code: u16, down: bool) {
+        self.inner().button(capture, code, down)
+    }
+    fn wheel(&mut self, capture: bool, horizontal: bool, v120: i32) {
+        self.inner().wheel(capture, horizontal, v120)
+    }
+    fn move_abs(&mut self, x: i32, y: i32) {
+        self.inner().move_abs(x, y)
+    }
+    fn move_rel(&mut self, dx: i32, dy: i32) {
+        self.inner().move_rel(dx, dy)
+    }
+    fn flush(&mut self) {
+        self.inner().flush()
+    }
+}
