@@ -1,0 +1,11 @@
+{
+  "name": "glidekm",
+  "author": "glidekm contributors",
+  "flags": ["root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["input", "mouse", "keyboard"],
+    "description": "Use your Windows PC's mouse and keyboard on the Deck as if it were an extra monitor.",
+    "image": ""
+  }
+}

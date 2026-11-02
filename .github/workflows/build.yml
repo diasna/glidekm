@@ -1,0 +1,178 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - name: End-to-end (simulated server -> dry-run client)
+        run: |
+          cargo build --release
+          ./target/release/glidekm-client --passphrase ci --port 4343 --width 1280 --height 800 --dry-run > client.log 2>&1 &
+          sleep 0.5
+          ./target/release/glidekm-server --simulate --client 127.0.0.1:4343 --passphrase ci
+          sleep 0.3
+          kill %1 || true
+          cat client.log
+          grep -q "key 35 down" client.log
+          grep -q "rel 15 -4" client.log
+          grep -q "key 30 up" client.log
+
+  # Runs the real Windows server binary (low-level hooks, blocking, edge
+  # switching, hotkeys) under Wine, driven by SendInput, against the client.
+  windows-e2e-wine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install mingw, wine, xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 wine64 xvfb
+      - run: cargo build --release -p glidekm-client
+      - run: cargo build --release -p glidekm-server --target x86_64-pc-windows-gnu --bins --examples
+      - name: Run under Wine
+        run: |
+          export DISPLAY=:99 WINEDEBUG=-all WINEPREFIX=$PWD/.wine
+          WINE=$(command -v wine64 || echo /usr/lib/wine/wine64)
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 1
+          timeout 180 $WINE wineboot -i || true
+          ./target/release/glidekm-client --passphrase ci --port 4343 --width 1280 --height 800 --dry-run > client.log 2>&1 &
+          W=target/x86_64-pc-windows-gnu/release
+          timeout 60 $WINE $W/glidekm-server.exe --client 127.0.0.1:4343 --passphrase ci > server.log 2>&1 &
+          for i in $(seq 1 30); do grep -q "client online" server.log && break; sleep 1; done
+          timeout 60 $WINE $W/examples/inject.exe
+          sleep 1
+          echo "--- server"; cat server.log; echo "--- client"; cat client.log
+          grep -q -- "-> client at (1, 500)" server.log
+          grep -q "key 35 down" client.log
+          grep -q "button 0x110 up" client.log
+          grep -q "wheel v -120" client.log
+          grep -q -- "-> client at (640, 400)" server.log
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p glidekm-server --all-targets -- -D warnings
+      - run: cargo test -p glidekm-server
+      - run: cargo build --release -p glidekm-server
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out/glidekm-windows | Out-Null
+          Copy-Item target/release/glidekm-server.exe out/glidekm-windows/
+          Copy-Item dist/windows/* out/glidekm-windows/
+          Copy-Item README.md, LICENSE out/glidekm-windows/
+          Compress-Archive -Path out/glidekm-windows -DestinationPath out/glidekm-windows-x86_64.zip
+          Get-Item target/release/glidekm-server.exe | Select-Object Name, Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glidekm-windows-x86_64
+          path: out/glidekm-windows-x86_64.zip
+
+  steamos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p glidekm-client --target x86_64-unknown-linux-musl
+      - name: Package
+        run: |
+          B=target/x86_64-unknown-linux-musl/release/glidekm-client
+          file "$B"; ls -l "$B"
+          mkdir -p out/glidekm-steamos
+          cp "$B" dist/steamos/install.sh dist/steamos/client.conf.example README.md LICENSE out/glidekm-steamos/
+          tar -C out -czf out/glidekm-steamos-x86_64.tar.gz glidekm-steamos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glidekm-steamos-x86_64
+          path: out/glidekm-steamos-x86_64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-binary
+          path: target/x86_64-unknown-linux-musl/release/glidekm-client
+
+  decky:
+    needs: steamos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build frontend
+        working-directory: decky
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - uses: actions/download-artifact@v4
+        with:
+          name: client-binary
+          path: decky-bin
+      - name: Package plugin zip
+        run: |
+          P=out/glidekm
+          mkdir -p $P/dist $P/bin
+          cp decky/plugin.json decky/package.json decky/main.py LICENSE $P/
+          cp README.md $P/README.md
+          cp decky/dist/index.js $P/dist/
+          install -m 755 decky-bin/glidekm-client $P/bin/glidekm-client
+          (cd out && zip -r glidekm-decky.zip glidekm)
+          unzip -l out/glidekm-decky.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glidekm-decky
+          path: out/glidekm-decky.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, windows-e2e-wine, windows, steamos, decky]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/glidekm-windows-x86_64/*.zip
+            artifacts/glidekm-steamos-x86_64/*.tar.gz
+            artifacts/glidekm-decky/*.zip

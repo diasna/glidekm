@@ -1,0 +1,9 @@
+# glidekm client configuration (~/.config/glidekm/client.conf)
+# Must match the passphrase in glidekm-server.conf on the PC.
+passphrase = change-me
+# UDP port to listen on.
+port = 4242
+# Logical screen size. Leave unset to auto-detect (handles Deck rotation and docking).
+# width = 1280
+# height = 800
+# verbose = true
