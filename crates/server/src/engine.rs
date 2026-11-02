@@ -452,7 +452,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            e.actions.drain(..).collect::<Vec<_>>(),
+            std::mem::take(&mut e.actions),
             vec![Action::HideCursor, Action::Warp(960, 540)]
         );
 
@@ -496,7 +496,7 @@ mod tests {
         assert!(!e.is_remote());
         assert_eq!(drain(&rx), vec![Event::Leave]);
         assert_eq!(
-            e.actions.drain(..).collect::<Vec<_>>(),
+            std::mem::take(&mut e.actions),
             vec![Action::Warp(1915, 490), Action::ShowCursor]
         );
     }

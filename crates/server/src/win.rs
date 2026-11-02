@@ -137,7 +137,7 @@ fn run_actions() {
     let acts: Vec<Action> = ENGINE.with(|cell| {
         cell.try_borrow_mut()
             .ok()
-            .and_then(|mut g| g.as_mut().map(|e| e.actions.drain(..).collect()))
+            .and_then(|mut g| g.as_mut().map(|e| std::mem::take(&mut e.actions)))
             .unwrap_or_default()
     });
     for a in acts {
