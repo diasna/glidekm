@@ -1202,6 +1202,7 @@ fn bring_up(hwnd: HWND) {
 fn hide(hwnd: HWND) {
     unsafe { ShowWindow(hwnd, SW_HIDE) };
     PAUSE_HOTKEYS.store(false, Ordering::SeqCst);
+    tray::notify_hidden();
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {

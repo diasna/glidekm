@@ -1,7 +1,12 @@
-//! Windows notification-area icon, its menu, opening the settings page, and
-//! the per-user "start with Windows" registry entry.
+//! Windows notification-area icon (on its own thread), its menu, and the
+//! per-user "start with Windows" registry entry.
+//!
+//! The tray talks to Explorer, which can stall; keeping it off the input
+//! thread means a busy Explorer can never delay the low-level input hooks.
 
-use crate::control::Status;
+use crate::control::{Control, Status};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::Arc;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::Registry::*;
@@ -9,6 +14,14 @@ use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 pub const WM_APP_TRAY: u32 = WM_APP + 5;
+/// Posted to the main (input) window by the tray menu.
+pub const WM_APP_QUIT: u32 = WM_APP + 6;
+const WM_APP_BALLOON: u32 = WM_APP + 40;
+const WM_APP_REMOVE: u32 = WM_APP + 41;
+const TIMER_STATUS: usize = 1;
+
+static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+static BALLOON_SHOWN: AtomicBool = AtomicBool::new(false);
 pub const ID_OPEN: usize = 1;
 pub const ID_SWITCH: usize = 2;
 pub const ID_QUIT: usize = 3;
@@ -185,6 +198,18 @@ impl Tray {
         }
     }
 
+    /// Notification bubble from the tray icon.
+    pub fn balloon(&self, title: &str, text: &str) {
+        let mut n = nid(self.hwnd);
+        n.uFlags = NIF_INFO;
+        let t: Vec<u16> = title.encode_utf16().take(n.szInfoTitle.len() - 1).collect();
+        n.szInfoTitle[..t.len()].copy_from_slice(&t);
+        let b: Vec<u16> = text.encode_utf16().take(n.szInfo.len() - 1).collect();
+        n.szInfo[..b.len()].copy_from_slice(&b);
+        n.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME | NIIF_NOSOUND;
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &n) };
+    }
+
     /// Show the context menu at the cursor; returns the chosen command id.
     pub fn menu(&self, can_switch: bool, in_deck: bool) -> usize {
         unsafe {
@@ -295,5 +320,165 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("registry error {r}"))
+    }
+}
+
+// ---------------------------------------------------------------- tray thread
+
+struct TrayThread {
+    ctl: Arc<Control>,
+    main: HWND,
+    tray: Tray,
+    taskbar_created: u32,
+}
+
+thread_local! {
+    static STATE: std::cell::RefCell<Option<TrayThread>> = const { std::cell::RefCell::new(None) };
+}
+
+fn tip(ctl: &Control) -> String {
+    format!("glidekm - {}", ctl.status_text())
+}
+
+unsafe extern "system" fn tray_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let handled = STATE.with(|s| {
+        let mut g = s.borrow_mut();
+        let st = g.as_mut()?;
+        match msg {
+            WM_TIMER => {
+                let status = st.ctl.status();
+                let t = tip(&st.ctl);
+                st.tray.update(status, &t);
+                Some(0)
+            }
+            WM_APP_TRAY => {
+                match (lp & 0xFFFF) as u32 {
+                    WM_LBUTTONUP | WM_LBUTTONDBLCLK => crate::settings::show(st.ctl.clone()),
+                    WM_RBUTTONUP | WM_CONTEXTMENU => {
+                        let status = st.ctl.status();
+                        let cmd = st.tray.menu(
+                            matches!(status, Status::Online | Status::Active),
+                            status == Status::Active,
+                        );
+                        match cmd {
+                            ID_OPEN => crate::settings::show(st.ctl.clone()),
+                            ID_SWITCH => st.ctl.platform.lock().unwrap().toggle_switch(),
+                            ID_QUIT => {
+                                PostMessageW(st.main, WM_APP_QUIT, 0, 0);
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+                Some(0)
+            }
+            WM_APP_BALLOON => {
+                st.tray.balloon(
+                    "glidekm is still running",
+                    "It keeps sharing your mouse and keyboard in the background. Click the glidekm icon in the system tray (^) to open settings.",
+                );
+                Some(0)
+            }
+            WM_APP_REMOVE => {
+                st.tray.remove();
+                PostQuitMessage(0);
+                Some(0)
+            }
+            m if m != 0 && m == st.taskbar_created => {
+                // Explorer restarted: put the icon back.
+                let status = st.ctl.status();
+                let t = tip(&st.ctl);
+                st.tray.add(status, &t);
+                Some(0)
+            }
+            _ => None,
+        }
+    });
+    match handled {
+        Some(r) => r,
+        None => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+/// Start the tray icon on its own thread.
+pub fn spawn(ctl: Arc<Control>, main: HWND) {
+    let main = main as isize;
+    let _ = std::thread::Builder::new()
+        .name("tray".into())
+        .spawn(move || unsafe {
+            let hinst =
+                windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null());
+            let class = wide("glidekm-tray");
+            let mut wc: WNDCLASSW = std::mem::zeroed();
+            wc.lpfnWndProc = Some(tray_wndproc);
+            wc.hInstance = hinst;
+            wc.lpszClassName = class.as_ptr();
+            RegisterClassW(&wc);
+            // Top-level (hidden) so it receives the TaskbarCreated broadcast.
+            let hwnd = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                class.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                hinst,
+                std::ptr::null(),
+            );
+            if hwnd.is_null() {
+                glidekm_core::warn!("cannot create tray window");
+                return;
+            }
+            let tc = wide("TaskbarCreated");
+            let mut tray = Tray::new(hwnd);
+            tray.add(ctl.status(), &tip(&ctl));
+            STATE.with(|s| {
+                *s.borrow_mut() = Some(TrayThread {
+                    ctl,
+                    main: main as HWND,
+                    tray,
+                    taskbar_created: RegisterWindowMessageW(tc.as_ptr()),
+                })
+            });
+            TRAY_HWND.store(hwnd as isize, Ordering::SeqCst);
+            SetTimer(hwnd, TIMER_STATUS, 500, None);
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        });
+}
+
+/// The settings window was hidden: say once per run that glidekm keeps
+/// running (new tray icons are tucked away in the overflow on Windows 11).
+pub fn notify_hidden() {
+    let h = TRAY_HWND.load(Ordering::SeqCst);
+    if h != 0 && !BALLOON_SHOWN.swap(true, Ordering::SeqCst) {
+        unsafe { PostMessageW(h as HWND, WM_APP_BALLOON, 0, 0) };
+    }
+}
+
+/// Remove the icon before the process exits (waits briefly).
+pub fn shutdown() {
+    let h = TRAY_HWND.swap(0, Ordering::SeqCst);
+    if h != 0 {
+        let mut r = 0usize;
+        unsafe {
+            SendMessageTimeoutW(
+                h as HWND,
+                WM_APP_REMOVE,
+                0,
+                0,
+                SMTO_ABORTIFHUNG,
+                1000,
+                &mut r,
+            );
+        }
     }
 }

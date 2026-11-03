@@ -2,14 +2,14 @@
 //! window runs deferred cursor actions, timers, display-change handling, the
 //! tray icon and settings changes coming from the UI thread.
 
-use crate::control::{Control, Platform, Status};
+use crate::control::{Control, Platform};
 use crate::engine::{Action, Engine, Input};
 use crate::layout::{Layout, Rect};
-use crate::tray::{self, Tray};
+use crate::tray;
 use crate::Opts;
 use glidekm_core::{info, warn};
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::*;
@@ -31,13 +31,17 @@ const CLASS_NAME: &str = "glidekm-server";
 thread_local! {
     static ENGINE: RefCell<Option<Engine>> = const { RefCell::new(None) };
     static HWND_MAIN: std::cell::Cell<HWND> = const { std::cell::Cell::new(std::ptr::null_mut()) };
-    static TRAY: RefCell<Option<Tray>> = const { RefCell::new(None) };
-    static TASKBAR_CREATED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 static CONTROL: OnceLock<Arc<Control>> = OnceLock::new();
 
 static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
+static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
+static KBD_HOOK: AtomicIsize = AtomicIsize::new(0);
+/// Mouse movements seen by Raw Input since the mouse hook last ran. If this
+/// keeps growing, Windows has silently removed our hook (it does that when a
+/// hook answers too slowly) and we reinstall it.
+static RAW_WITHOUT_HOOK: AtomicU32 = AtomicU32::new(0);
 /// Treat software-injected mouse moves as non-physical (config `ignore_injected`).
 static IGNORE_INJECTED: AtomicBool = AtomicBool::new(false);
 
@@ -136,49 +140,97 @@ fn apply_config() {
         Err(e) => warn!("config not applied: {e}"),
     }
     run_actions();
-    update_tray();
-}
-
-fn tray_tip() -> String {
-    format!("glidekm - {}", ctl().status_text())
-}
-
-fn update_tray() {
-    let (st, tip) = (ctl().status(), tray_tip());
-    TRAY.with(|t| {
-        if let Some(t) = t.borrow_mut().as_mut() {
-            t.update(st, &tip);
-        }
-    });
 }
 
 fn open_ui() {
     crate::settings::show(ctl().clone());
 }
 
-fn show_tray_menu() {
-    let st = ctl().status();
-    let cmd = TRAY.with(|t| {
-        t.borrow()
-            .as_ref()
-            .map(|t| {
-                t.menu(
-                    matches!(st, Status::Online | Status::Active),
-                    st == Status::Active,
-                )
-            })
-            .unwrap_or(0)
-    });
-    match cmd {
-        tray::ID_OPEN => open_ui(),
-        tray::ID_SWITCH => {
-            with_engine(|e| e.toggle());
-            run_actions();
+/// Keep the input thread responsive in the background: opt out of Windows
+/// power throttling (EcoQoS / "efficiency mode", applied to processes without
+/// a visible window) and run the hook thread at the highest priority. Slow
+/// hook answers make the whole system's mouse lag.
+unsafe fn no_throttling() {
+    let ps = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+            | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        StateMask: 0,
+    };
+    if SetProcessInformation(
+        GetCurrentProcess(),
+        ProcessPowerThrottling,
+        &ps as *const _ as *const _,
+        std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+    ) == 0
+    {
+        // Not available before Windows 10 1709 (or under Wine).
+        glidekm_core::debug!(
+            "power throttling opt-out unavailable (error {})",
+            GetLastError()
+        );
+    }
+    let ts = THREAD_POWER_THROTTLING_STATE {
+        Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    SetThreadInformation(
+        GetCurrentThread(),
+        ThreadPowerThrottling,
+        &ts as *const _ as *const _,
+        std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
+    );
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+}
+
+unsafe fn install_hooks() -> bool {
+    let hinst = GetModuleHandleW(std::ptr::null());
+    for (slot, h) in [(&MOUSE_HOOK, 0), (&KBD_HOOK, 1)] {
+        let old = slot.swap(0, Ordering::SeqCst);
+        if old != 0 {
+            UnhookWindowsHookEx(old as HHOOK);
         }
-        tray::ID_QUIT => unsafe {
-            DestroyWindow(HWND_MAIN.with(|h| h.get()));
-        },
-        _ => {}
+        let new = if h == 0 {
+            SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0)
+        } else {
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(kbd_proc), hinst, 0)
+        };
+        if new.is_null() {
+            return false;
+        }
+        slot.store(new as isize, Ordering::SeqCst);
+    }
+    RAW_WITHOUT_HOOK.store(0, Ordering::SeqCst);
+    true
+}
+
+unsafe fn remove_hooks() {
+    for slot in [&MOUSE_HOOK, &KBD_HOOK] {
+        let h = slot.swap(0, Ordering::SeqCst);
+        if h != 0 {
+            UnhookWindowsHookEx(h as HHOOK);
+        }
+    }
+}
+
+/// Called from the 100 ms timer.
+unsafe fn hook_watchdog() {
+    thread_local! {
+        static LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    }
+    // ~100+ raw mouse moves with no hook call = hook is gone. At most once
+    // per 10 s, in case something else legitimately swallows the events.
+    let recent = LAST.with(|l| {
+        l.get()
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10))
+    });
+    if !recent && RAW_WITHOUT_HOOK.load(Ordering::SeqCst) > 100 {
+        LAST.with(|l| l.set(Some(std::time::Instant::now())));
+        warn!("Windows removed the input hooks (system was busy) - reinstalling");
+        if !install_hooks() {
+            warn!("reinstalling input hooks failed (error {})", GetLastError());
+        }
     }
 }
 
@@ -261,6 +313,7 @@ fn run_actions() {
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    RAW_WITHOUT_HOOK.store(0, Ordering::Relaxed);
     if code == HC_ACTION as i32 {
         let ms = &*(lparam as *const MSLLHOOKSTRUCT);
         let injected = ms.flags & LLMHF_INJECTED != 0 && IGNORE_INJECTED.load(Ordering::Relaxed);
@@ -350,6 +403,7 @@ unsafe fn on_raw_input(lparam: LPARAM) {
     if ri.header.dwType == RIM_TYPEMOUSE {
         let m = &ri.data.mouse;
         if m.usFlags & MOUSE_MOVE_ABSOLUTE == 0 && (m.lLastX != 0 || m.lLastY != 0) {
+            RAW_WITHOUT_HOOK.fetch_add(1, Ordering::Relaxed);
             feed(Input::Raw {
                 dx: m.lLastX,
                 dy: m.lLastY,
@@ -371,7 +425,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TIMER => {
             feed(Input::Tick);
             run_actions();
-            update_tray();
+            hook_watchdog();
             0
         }
         WM_DISPLAYCHANGE => {
@@ -409,31 +463,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             open_ui();
             0
         }
-        tray::WM_APP_TRAY => {
-            match (lparam & 0xFFFF) as u32 {
-                WM_LBUTTONUP | WM_LBUTTONDBLCLK => open_ui(),
-                WM_RBUTTONUP | WM_CONTEXTMENU => show_tray_menu(),
-                _ => {}
-            }
+        tray::WM_APP_QUIT => {
+            DestroyWindow(hwnd);
             0
         }
         WM_DESTROY => {
-            TRAY.with(|t| {
-                if let Some(t) = t.borrow_mut().as_mut() {
-                    t.remove();
-                }
-            });
+            tray::shutdown();
             PostQuitMessage(0);
-            0
-        }
-        m if m != 0 && m == TASKBAR_CREATED.with(|c| c.get()) => {
-            // Explorer restarted: put the icon back.
-            let (st, tip) = (ctl().status(), tray_tip());
-            TRAY.with(|t| {
-                if let Some(t) = t.borrow_mut().as_mut() {
-                    t.add(st, &tip);
-                }
-            });
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -458,6 +494,7 @@ pub fn run(control: Arc<Control>, opts: Opts) -> Result<(), String> {
         }
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+        no_throttling();
         // A previous crash may have left the blank cursor installed.
         restore_cursor();
         SetConsoleCtrlHandler(Some(console_handler), 1);
@@ -508,8 +545,6 @@ pub fn run(control: Arc<Control>, opts: Opts) -> Result<(), String> {
         *control.platform.lock().unwrap() = Box::new(WinPlatform {
             hwnd: hwnd as isize,
         });
-        let tc = wide("TaskbarCreated");
-        TASKBAR_CREATED.with(|c| c.set(RegisterWindowMessageW(tc.as_ptr())));
 
         let tx = crate::start_services(&control)?;
         let layout = Layout {
@@ -551,18 +586,14 @@ pub fn run(control: Arc<Control>, opts: Opts) -> Result<(), String> {
             warn!("raw input unavailable; game mode will use accelerated deltas");
         }
 
-        let mh = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0);
-        let kh = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kbd_proc), hinst, 0);
-        if mh.is_null() || kh.is_null() {
+        if !install_hooks() {
             return Err("failed to install input hooks".into());
         }
         SetTimer(hwnd, TIMER_TICK, 100, None);
         crate::winupdate::spawn(control.clone(), hwnd as isize);
 
         if !opts.flags.flag("no_tray") {
-            let mut t = Tray::new(hwnd);
-            t.add(control.status(), &tray_tip());
-            TRAY.with(|c| *c.borrow_mut() = Some(t));
+            tray::spawn(control.clone(), hwnd);
         }
         info!("ready - hooks installed");
         if !control.cfg.lock().unwrap().configured() || opts.flags.flag("open_ui") {
@@ -574,8 +605,7 @@ pub fn run(control: Arc<Control>, opts: Opts) -> Result<(), String> {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        UnhookWindowsHookEx(mh);
-        UnhookWindowsHookEx(kh);
+        remove_hooks();
     }
     restore_cursor();
     info!("exiting");
