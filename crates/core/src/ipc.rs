@@ -196,6 +196,8 @@ pub struct Status {
     pub width: u16,
     pub height: u16,
     pub screen_auto: bool,
+    /// Where the screen size came from (e.g. "external display HDMI-A-1").
+    pub screen_source: String,
     pub passphrase_set: bool,
     pub net_error: String,
     pub input_error: String,
@@ -216,7 +218,7 @@ impl Status {
     pub fn to_file(&self) -> String {
         format!(
             "pid = {}\nversion = {}\nupdated = {}\nlistening = {}\nport = {}\nserver = {}\n\
-             active = {}\ncapture = {}\nwidth = {}\nheight = {}\nscreen_auto = {}\n\
+             active = {}\ncapture = {}\nwidth = {}\nheight = {}\nscreen_auto = {}\nscreen_source = {}\n\
              passphrase_set = {}\nnet_error = {}\ninput_error = {}\nlast_rejected = {}\n\
              update_status = {}\nupdate_available = {}\nupdate_unsupported = {}\n",
             self.pid,
@@ -230,6 +232,7 @@ impl Status {
             self.width,
             self.height,
             self.screen_auto,
+            one_line(&self.screen_source),
             self.passphrase_set,
             one_line(&self.net_error),
             one_line(&self.input_error),
@@ -255,6 +258,7 @@ impl Status {
             width: n("width") as u16,
             height: n("height") as u16,
             screen_auto: c.flag("screen_auto"),
+            screen_source: c.str_or("screen_source", ""),
             passphrase_set: c.flag("passphrase_set"),
             net_error: c.str_or("net_error", ""),
             input_error: c.str_or("input_error", ""),
@@ -317,6 +321,7 @@ mod tests {
             width: 1280,
             height: 800,
             screen_auto: true,
+            screen_source: "external display HDMI-A-1 (active mode)".into(),
             passphrase_set: true,
             net_error: String::new(),
             input_error: "cannot open /dev/uinput: denied".into(),

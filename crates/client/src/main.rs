@@ -44,6 +44,7 @@ struct Daemon {
     status: Status,
     json_status: Option<PathBuf>,
     updater: updater::Updater,
+    screens: screen::Detector,
 }
 
 fn run() -> Result<(), String> {
@@ -114,13 +115,29 @@ fn run() -> Result<(), String> {
         },
         json_status: flags.get("status_file").map(PathBuf::from),
         updater: updater::Updater::spawn(auto_update),
+        screens: screen::Detector::new(),
     };
 
     // Each iteration (re)applies the configuration; `serve` returns when the
     // config file changed.
     loop {
         let fixed = d.cfg.fixed_size();
-        let (w, h) = fixed.or_else(screen::detect).unwrap_or((1280, 800));
+        let (w, h) = match fixed {
+            Some(f) => {
+                d.status.screen_source = "set manually".into();
+                f
+            }
+            None => match d.screens.detect() {
+                Some(det) => {
+                    d.status.screen_source = det.source;
+                    (det.w, det.h)
+                }
+                None => {
+                    d.status.screen_source = "not detected - assuming the Deck's screen".into();
+                    (1280, 800)
+                }
+            },
+        };
         d.st.deactivate();
         d.st.width = w;
         d.st.height = h;
@@ -316,9 +333,11 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
         // Dock/undock changes the screen; re-check every few seconds.
         if autodetect && last_detect.elapsed() > Duration::from_secs(5) {
             last_detect = Instant::now();
-            if let Some((w, h)) = screen::detect() {
+            if let Some(det) = d.screens.detect() {
+                let (w, h) = (det.w, det.h);
+                d.status.screen_source = det.source.clone();
                 if (w, h) != (d.st.width, d.st.height) {
-                    info!("screen changed to {w}x{h}");
+                    info!("screen changed to {w}x{h} ({})", det.source);
                     d.st.width = w;
                     d.st.height = h;
                     if let Some(p) = peer.as_mut() {

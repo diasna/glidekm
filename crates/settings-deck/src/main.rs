@@ -380,7 +380,16 @@ impl eframe::App for App {
                         ui.end_row();
                         ui.label(weak("Screen"));
                         match &st {
-                            Some(s) => ui.label(format!("{}×{} ({})", s.width, s.height, if s.screen_auto { "auto" } else { "manual" })),
+                            Some(s) => ui.label(format!(
+                                "{}×{} · {}",
+                                s.width,
+                                s.height,
+                                if s.screen_source.is_empty() {
+                                    if s.screen_auto { "auto" } else { "manual" }
+                                } else {
+                                    s.screen_source.as_str()
+                                }
+                            )),
                             None => ui.label("–"),
                         };
                         ui.end_row();
