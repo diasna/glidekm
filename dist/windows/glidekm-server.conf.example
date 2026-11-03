@@ -1,7 +1,8 @@
 # glidekm server configuration - keep next to glidekm-server.exe
 
-# Steam Deck address (IP or hostname, optional :port; default port 4242).
-client = steamdeck.local
+# Steam Deck address (IP or hostname, optional :port). Leave empty to find
+# the Deck automatically on the local network.
+client =
 # Must match the passphrase on the Deck.
 passphrase = change-me
 

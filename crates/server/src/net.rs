@@ -4,7 +4,7 @@
 
 use glidekm_core::event::{encode_all, Event, KeyBitmap, KEY_BITMAP_LEN};
 use glidekm_core::session::{self, Initiator, Transport, PKT_DATA, PKT_RESP};
-use glidekm_core::{debug, info, warn};
+use glidekm_core::{debug, discovery, info, warn};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -30,6 +30,10 @@ pub struct Shared {
     pub peer: Mutex<Option<SocketAddr>>,
     /// Last connection problem, for status displays ("" = none).
     pub last_error: Mutex<String>,
+    /// Hostname of the connected Deck (from discovery), if known.
+    pub peer_name: Mutex<String>,
+    /// No address configured: find the Deck on the LAN.
+    pub auto: AtomicBool,
 }
 
 impl Shared {
@@ -44,11 +48,15 @@ impl Shared {
             gen: AtomicU64::new(0),
             peer: Mutex::new(None),
             last_error: Mutex::new(String::new()),
+            peer_name: Mutex::new(String::new()),
+            auto: AtomicBool::new(false),
         })
     }
 
-    /// Point the connection at a (new) client. Takes effect immediately.
+    /// Point the connection at a (new) client - an address, or "" to find
+    /// it automatically. Takes effect immediately.
     pub fn set_target(&self, addr: &str, psk: [u8; 32]) {
+        self.auto.store(is_auto(addr), Ordering::Relaxed);
         let mut t = self.target.lock().unwrap();
         let new = Some((addr.to_string(), psk));
         if *t != new {
@@ -71,23 +79,69 @@ impl Shared {
     }
 }
 
+pub fn is_auto(target: &str) -> bool {
+    let t = target.trim();
+    t.is_empty() || t.eq_ignore_ascii_case("auto")
+}
+
+#[derive(Default)]
 struct Conn {
+    /// The client of the current session.
     addr: Option<SocketAddr>,
-    pending: Option<Initiator>,
+    /// Handshakes in flight, one per candidate.
+    pending: Vec<(SocketAddr, Initiator)>,
     tr: Option<Arc<Transport>>,
     last_hello: Option<Instant>,
+    /// Auto mode: Decks seen on the LAN (address, hostname, last seen).
+    candidates: Vec<(SocketAddr, String, Instant)>,
+    /// When we started trying candidates without success.
+    trying_since: Option<Instant>,
+}
+
+impl Conn {
+    fn saw(&mut self, addr: SocketAddr, name: String) {
+        match self.candidates.iter_mut().find(|c| c.0 == addr) {
+            Some(c) => {
+                c.1 = name;
+                c.2 = Instant::now();
+            }
+            None => {
+                info!(
+                    "found glidekm on {} ({addr})",
+                    if name.is_empty() { "a Deck" } else { &name }
+                );
+                self.candidates.push((addr, name, Instant::now()));
+            }
+        }
+    }
+
+    fn name_of(&self, addr: SocketAddr) -> String {
+        self.candidates
+            .iter()
+            .find(|c| c.0 == addr)
+            .map(|c| c.1.clone())
+            .unwrap_or_default()
+    }
 }
 
 pub fn spawn(shared: Arc<Shared>) -> std::io::Result<Sender<Event>> {
     let sock = UdpSocket::bind("0.0.0.0:0")?;
+    sock.set_broadcast(true)?;
     let rsock = sock.try_clone()?;
-    let conn = Arc::new(Mutex::new(Conn {
-        addr: None,
-        pending: None,
-        tr: None,
-        last_hello: None,
-    }));
+    let conn = Arc::new(Mutex::new(Conn::default()));
     let (tx, rx) = mpsc::channel();
+
+    // Decks announce themselves on the default port while unconnected.
+    match UdpSocket::bind(("0.0.0.0", glidekm_core::DEFAULT_PORT)) {
+        Ok(bsock) => {
+            let c = conn.clone();
+            let sh = shared.clone();
+            std::thread::Builder::new()
+                .name("net-beacons".into())
+                .spawn(move || beacon_loop(bsock, c, sh))?;
+        }
+        Err(e) => debug!("not listening for Deck announcements: {e}"),
+    }
 
     let c = conn.clone();
     let sh = shared.clone();
@@ -123,6 +177,7 @@ fn send_loop(sock: UdpSocket, rx: Receiver<Event>, conn: Arc<Mutex<Conn>>, share
     let timeout = Duration::from_millis(glidekm_core::CLIENT_TIMEOUT_MS);
     let mut last_hb = Instant::now() - hb;
     let mut last_init: Option<Instant> = None;
+    let mut last_probe: Option<Instant> = None;
     let mut last_ts = 0u64;
     let mut warned_resolve = false;
     let mut batch = Vec::with_capacity(32);
@@ -148,13 +203,9 @@ fn send_loop(sock: UdpSocket, rx: Receiver<Event>, conn: Arc<Mutex<Conn>>, share
         let gen = shared.gen.load(Ordering::SeqCst);
         if gen != my_gen {
             my_gen = gen;
-            *conn.lock().unwrap() = Conn {
-                addr: None,
-                pending: None,
-                tr: None,
-                last_hello: None,
-            };
+            *conn.lock().unwrap() = Conn::default();
             *shared.peer.lock().unwrap() = None;
+            shared.peer_name.lock().unwrap().clear();
             shared.client_size.store(0, Ordering::Relaxed);
             shared.set_error("");
             last_init = None;
@@ -183,29 +234,84 @@ fn send_loop(sock: UdpSocket, rx: Receiver<Event>, conn: Arc<Mutex<Conn>>, share
             // (Re)connect: send INIT at most once per second.
             if last_init.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
                 last_init = Some(Instant::now());
-                match resolve(&target) {
-                    Some(a) => {
-                        warned_resolve = false;
-                        let ts = session::now_millis().max(last_ts + 1);
-                        last_ts = ts;
-                        if let Ok((ini, pkt)) = Initiator::start(&psk, ts) {
-                            {
-                                let mut c = conn.lock().unwrap();
-                                c.pending = Some(ini);
-                                c.addr = Some(a);
+                let auto = is_auto(&target);
+                let targets: Vec<SocketAddr> = if auto {
+                    // Ask the LAN every 3 s; Decks also announce themselves.
+                    if last_probe.is_none_or(|t| t.elapsed() >= Duration::from_secs(3)) {
+                        last_probe = Some(Instant::now());
+                        discovery::broadcast(
+                            &sock,
+                            &discovery::probe(),
+                            glidekm_core::DEFAULT_PORT,
+                        );
+                    }
+                    let mut c = conn.lock().unwrap();
+                    c.candidates
+                        .retain(|x| x.2.elapsed() < Duration::from_secs(30));
+                    let mut v: Vec<SocketAddr> = c.candidates.iter().map(|x| x.0).collect();
+                    if let Some(a) = c.addr.filter(|a| !v.contains(a)) {
+                        v.push(a); // the last Deck we talked to
+                    }
+                    v
+                } else {
+                    match resolve(&target) {
+                        Some(a) => {
+                            warned_resolve = false;
+                            vec![a]
+                        }
+                        None => {
+                            if !warned_resolve {
+                                warned_resolve = true;
+                                warn!("cannot resolve client address '{target}', retrying");
+                                shared.set_error(&format!("cannot resolve '{target}'"));
                             }
-                            *shared.peer.lock().unwrap() = Some(a);
-                            debug!("handshake -> {a}");
-                            let _ = sock.send_to(&pkt, a);
+                            Vec::new()
                         }
                     }
-                    None if !warned_resolve => {
-                        warned_resolve = true;
-                        warn!("cannot resolve client address '{target}', retrying");
-                        shared.set_error(&format!("cannot resolve '{target}'"));
+                };
+                {
+                    // Decks that never complete the handshake have a
+                    // different passphrase (they stay silent by design).
+                    let mut c = conn.lock().unwrap();
+                    if targets.is_empty() {
+                        c.trying_since = None;
+                    } else {
+                        let since = *c.trying_since.get_or_insert_with(Instant::now);
+                        if auto && since.elapsed() > Duration::from_secs(5) {
+                            let names: Vec<String> = c
+                                .candidates
+                                .iter()
+                                .map(|x| {
+                                    if x.1.is_empty() {
+                                        x.0.ip().to_string()
+                                    } else {
+                                        format!("{} ({})", x.1, x.0.ip())
+                                    }
+                                })
+                                .collect();
+                            if !names.is_empty() {
+                                shared.set_error(&format!(
+                                    "Found {}, but the passphrase doesn't match",
+                                    names.join(", ")
+                                ));
+                            }
+                        }
                     }
-                    None => {}
                 }
+                let mut pending = Vec::new();
+                for a in targets {
+                    let ts = session::now_millis().max(last_ts + 1);
+                    last_ts = ts;
+                    if let Ok((ini, pkt)) = Initiator::start(&psk, ts) {
+                        debug!("handshake -> {a}");
+                        let _ = sock.send_to(&pkt, a);
+                        pending.push((a, ini));
+                    }
+                }
+                if !auto {
+                    *shared.peer.lock().unwrap() = pending.first().map(|p| p.0);
+                }
+                conn.lock().unwrap().pending = pending;
             }
             continue;
         };
@@ -248,27 +354,55 @@ fn recv_loop(sock: UdpSocket, conn: Arc<Mutex<Conn>>, shared: Arc<Shared>) {
         };
         let pkt = &buf[..n];
         let mut c = conn.lock().unwrap();
-        if c.addr != Some(from) {
-            continue;
-        }
         match pkt.first() {
+            Some(&discovery::PKT_DISCOVER_REPLY) => {
+                if shared.auto.load(Ordering::Relaxed) {
+                    if let Some((a, name)) = discovery::parse_reply(pkt, from) {
+                        c.saw(a, name);
+                    }
+                }
+            }
             Some(&PKT_RESP) => {
-                if let Some(ini) = c.pending.take() {
-                    match ini.finish(pkt) {
-                        Ok(tr) => {
-                            info!("session established with {from}");
-                            shared.set_error("");
-                            c.tr = Some(Arc::new(tr));
-                            c.last_hello = None;
-                        }
-                        Err(e) => {
-                            warn!("handshake failed ({e}) - passphrase mismatch?");
-                            shared.set_error("handshake failed - passphrase mismatch?");
-                        }
+                let Some(i) = c.pending.iter().position(|p| p.0 == from) else {
+                    continue;
+                };
+                let (_, ini) = c.pending.swap_remove(i);
+                match ini.finish(pkt) {
+                    Ok(tr) => {
+                        let name = c.name_of(from);
+                        info!(
+                            "session established with {}{from}",
+                            if name.is_empty() {
+                                String::new()
+                            } else {
+                                format!("{name} at ")
+                            }
+                        );
+                        shared.set_error("");
+                        c.addr = Some(from);
+                        c.pending.clear();
+                        c.trying_since = None;
+                        c.tr = Some(Arc::new(tr));
+                        c.last_hello = None;
+                        *shared.peer.lock().unwrap() = Some(from);
+                        *shared.peer_name.lock().unwrap() = name;
+                    }
+                    Err(e) => {
+                        let name = c.name_of(from);
+                        let who = if name.is_empty() {
+                            from.ip().to_string()
+                        } else {
+                            format!("{name} ({})", from.ip())
+                        };
+                        warn!("handshake with {who} failed ({e}) - passphrase mismatch?");
+                        shared.set_error(&format!("Found {who}, but its passphrase is different"));
                     }
                 }
             }
             Some(&PKT_DATA) => {
+                if c.addr != Some(from) {
+                    continue;
+                }
                 let Some(tr) = c.tr.clone() else { continue };
                 let Ok(plain) = tr.open(pkt) else { continue };
                 for ev in Event::decode_all(&plain) {
@@ -282,6 +416,23 @@ fn recv_loop(sock: UdpSocket, conn: Arc<Mutex<Conn>>, shared: Arc<Shared>) {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Collects Decks that announce themselves (auto mode only).
+fn beacon_loop(sock: UdpSocket, conn: Arc<Mutex<Conn>>, shared: Arc<Shared>) {
+    let mut buf = [0u8; 256];
+    loop {
+        let Ok((n, from)) = sock.recv_from(&mut buf) else {
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        };
+        if !shared.auto.load(Ordering::Relaxed) {
+            continue;
+        }
+        if let Some((a, name)) = discovery::parse_announce(&buf[..n], from) {
+            conn.lock().unwrap().saw(a, name);
         }
     }
 }

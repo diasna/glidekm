@@ -332,7 +332,7 @@ impl eframe::App for App {
 
                 // ---- This Deck
                 section(ui, "This Deck", |ui| {
-                    ui.label(RichText::new("Enter this address on your PC (or press Scan in the PC's glidekm settings).").weak());
+                    ui.label(RichText::new("Your PC finds this Deck by itself when both use the same passphrase. If it can't (e.g. different networks), enter this address on the PC.").weak());
                     let port = st.as_ref().map(|s| s.port).unwrap_or(self.saved_cfg.port);
                     let ip = self.ips.first().cloned().unwrap_or_else(|| "no network".into());
                     ui.horizontal(|ui| {

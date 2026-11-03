@@ -44,8 +44,9 @@ Download from the [Releases](../../releases) page (or the latest CI run's artifa
    opens:
    - **Arrangement** - drag the Steam Deck next to your monitors, like Windows display settings.
      The green line shows where the cursor can cross.
-   - **Connection** - *Scan* finds Decks on your network (or type the IP / `steamdeck.local`), and set a
-     passphrase (*Generate* makes one; enter the same on the Deck).
+   - **Connection** - set a passphrase (*Generate* makes one) and enter the same one on the Deck. That's
+     all: with the address left empty, the PC **finds the Deck automatically** on your network. Enter an
+     address (or pick one with *Scan*) only if discovery can't reach it, e.g. across subnets or a VPN.
    - **Behavior** - pointer speed on the Deck, hotkeys (click a box and press the combination),
      *Start with Windows*.
    - **About** - automatic updates, *Check for updates*, config folder and log.
@@ -90,6 +91,17 @@ picks the change up within a second. Uninstall with `./install.sh --uninstall`.
 Use either the Decky plugin or the Desktop Mode service, not both - they would compete for the same port
 (glidekm Settings says so if it happens).
 
+## How the PC finds the Deck
+
+With no address configured, the PC broadcasts a small discovery probe every few seconds, and an
+unconnected Deck also announces itself every 3 seconds (UDP 4242, local network only). The PC then
+attempts the encrypted handshake with every Deck it found; only a Deck with the same passphrase can
+complete it, so that's the one it connects to. A Deck with a different passphrase is shown as
+"Found …, but the passphrase doesn't match". If the Deck's IP changes, it's simply found again.
+
+Discovery doesn't cross routers/VLANs; set the address manually there. On first start Windows may ask
+whether glidekm may use the network - allow it on private networks.
+
 ## Updates
 
 The PC server and the Desktop Mode client update themselves from this repository's
@@ -117,7 +129,7 @@ edit by hand (every key can be passed as `--key value` too; see `glidekm-server.
 
 | key | default | meaning |
 |---|---|---|
-| `client` | - | Deck address, `host[:port]` |
+| `client` | empty = automatic | Deck address, `host[:port]`; empty finds it on the LAN |
 | `passphrase` | - | shared secret, same on both sides |
 | `side` | `right` | where the Deck sits: `right`, `left`, `top`, `bottom` |
 | `offset` | `0` | shift the Deck screen along that edge (Windows px) |

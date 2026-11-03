@@ -15,7 +15,7 @@ use glidekm_core::config::Config;
 use glidekm_core::event::{encode_all, Event};
 use glidekm_core::ipc::{self, ClientConfig, Status};
 use glidekm_core::session::{self, Transport, PKT_DATA, PKT_DISCOVER, PKT_INIT};
-use glidekm_core::{debug, info, warn};
+use glidekm_core::{debug, discovery, info, warn};
 use settings::ConfigWatch;
 use sink::{Output, Recorder, RetryUinput, Sink};
 use state::State;
@@ -230,6 +230,8 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
     let mut last_watch = Instant::now();
     let mut rejected = String::new();
     let autodetect = d.cfg.fixed_size().is_none();
+    let mut last_announce: Option<Instant> = None;
+    let _ = sock.set_broadcast(true);
 
     loop {
         match sock.recv_from(&mut buf) {
@@ -237,10 +239,7 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
                 let pkt = &buf[..n];
                 match pkt.first() {
                     Some(&PKT_DISCOVER) if pkt.get(1..9) == Some(&session::DISCOVER_MAGIC[..]) => {
-                        let mut r = vec![session::PKT_DISCOVER_REPLY];
-                        r.extend_from_slice(session::DISCOVER_REPLY_MAGIC);
-                        r.extend_from_slice(hostname().as_bytes());
-                        let _ = sock.send_to(&r, from);
+                        let _ = sock.send_to(&discovery::reply(&hostname()), from);
                     }
                     Some(&PKT_INIT) => {
                         let Some(psk) = psk.as_ref() else {
@@ -328,6 +327,20 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
                 info!("server {} gone", p.addr);
                 peer = None;
             }
+        }
+
+        // Not connected: tell PCs on the LAN where we are (they find us even
+        // if their own broadcast probe is filtered).
+        if peer.is_none()
+            && psk.is_some()
+            && last_announce.is_none_or(|t| t.elapsed() >= Duration::from_secs(3))
+        {
+            last_announce = Some(Instant::now());
+            discovery::broadcast(
+                sock,
+                &discovery::announce(d.cfg.port, &hostname()),
+                glidekm_core::DEFAULT_PORT,
+            );
         }
 
         // Dock/undock changes the screen; re-check every few seconds.

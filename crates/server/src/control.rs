@@ -77,8 +77,10 @@ impl ServerConfig {
         Ok(cfg)
     }
 
+    /// Only the passphrase is required: with no address the Deck is found
+    /// automatically on the local network.
     pub fn configured(&self) -> bool {
-        !self.client.trim().is_empty() && !self.passphrase.is_empty()
+        !self.passphrase.is_empty()
     }
 
     pub fn engine_params(&self) -> Result<EngineParams, String> {
@@ -228,19 +230,29 @@ impl Control {
     pub fn status_text(&self) -> String {
         let peer = self.shared.peer.lock().unwrap().map(|a| a.to_string());
         match self.status() {
-            Status::Unconfigured => "Not configured".into(),
+            Status::Unconfigured => "Not set up - choose a passphrase".into(),
             Status::Connecting => {
                 let e = self.shared.last_error.lock().unwrap().clone();
-                if e.is_empty() {
+                if !e.is_empty() {
+                    e
+                } else if self.shared.auto.load(Ordering::Relaxed) {
+                    "Looking for your Steam Deck on this network…".into()
+                } else {
                     format!(
                         "Connecting to {}…",
                         peer.unwrap_or_else(|| self.cfg.lock().unwrap().client.clone())
                     )
-                } else {
-                    e
                 }
             }
-            Status::Online => format!("Connected to {}", peer.unwrap_or_default()),
+            Status::Online => {
+                let name = self.shared.peer_name.lock().unwrap().clone();
+                let peer = peer.unwrap_or_default();
+                if name.is_empty() {
+                    format!("Connected to {peer}")
+                } else {
+                    format!("Connected to {name} ({peer})")
+                }
+            }
             Status::Active => "Deck in use".into(),
         }
     }

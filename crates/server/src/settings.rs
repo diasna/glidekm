@@ -259,6 +259,13 @@ impl Ui {
                 Side::Bottom => 3,
             };
             SendMessageW(self.item(ID_SIDE), CB_SETCURSEL, side_idx, 0);
+            let auto = wide("Automatic - finds your Deck on this network");
+            SendMessageW(
+                self.item(ID_ADDR),
+                CB_SETCUEBANNER,
+                0,
+                auto.as_ptr() as isize,
+            );
             SendMessageW(self.item(ID_SPEED), TBM_SETPOS, 1, d.scale_pct as isize);
             set_hotkey(self.item(ID_HK_SWITCH), &d.hk_switch);
             set_hotkey(self.item(ID_HK_CAPTURE), &d.hk_capture);
@@ -654,7 +661,11 @@ impl Ui {
         self.add("STATIC", "", SS_LEFT, 0, ID_EDGE, [24, 326, 420, 20]);
 
         group(self, "Connection", [12, 360, 440, 170]);
-        lbl(self, "Steam Deck address (IP or name)", [24, 384, 410, 18]);
+        lbl(
+            self,
+            "Steam Deck address (leave empty to find it automatically)",
+            [24, 384, 410, 18],
+        );
         self.add(
             "COMBOBOX",
             "",
@@ -1470,7 +1481,7 @@ unsafe fn run(ctl: Arc<Control>) {
         u.fill();
         if !u.ctl.cfg.lock().unwrap().configured() {
             u.set_msg(
-                "Enter the Deck's address (or Scan) and a passphrase, then Save.",
+                "Choose a passphrase (the same as on the Deck) and Save - the Deck is found automatically.",
                 MsgKind::Info,
             );
         }
@@ -1479,8 +1490,8 @@ unsafe fn run(ctl: Arc<Control>) {
     SetTimer(hwnd, TIMER_REFRESH, 500, None);
     bring_up(hwnd);
     with_ui(|u| {
-        if u.ctl.cfg.lock().unwrap().client.is_empty() {
-            SetFocus(u.item(ID_ADDR));
+        if u.ctl.cfg.lock().unwrap().passphrase.is_empty() {
+            SetFocus(u.item(ID_PASS));
         }
     });
 

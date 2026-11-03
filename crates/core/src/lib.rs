@@ -1,6 +1,7 @@
 //! Shared code for glidekm: wire protocol, keymap, encrypted session, config, logging.
 
 pub mod config;
+pub mod discovery;
 pub mod event;
 pub mod ipc;
 pub mod keymap;
