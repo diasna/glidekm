@@ -6,6 +6,7 @@ pub mod ipc;
 pub mod keymap;
 pub mod log;
 pub mod session;
+pub mod update;
 
 pub const DEFAULT_PORT: u16 = 4242;
 /// Server sends a heartbeat this often.

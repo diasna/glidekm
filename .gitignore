@@ -3,3 +3,7 @@ node_modules/
 /decky/dist/
 /decky/out/
 /decky/bin/
+
+# Release signing private key (never commit)
+SIGNING-KEY-SECRET.txt
+*.secret

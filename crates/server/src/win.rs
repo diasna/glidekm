@@ -390,6 +390,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             run_actions();
             0
         }
+        crate::winupdate::WM_APP_INSTALL_UPDATE => {
+            match crate::winupdate::install() {
+                Ok(()) => {
+                    info!("restarting into the new version");
+                    DestroyWindow(hwnd);
+                }
+                Err(e) => {
+                    warn!("update install failed: {e}");
+                    let mut u = ctl().update.lock().unwrap();
+                    u.staged = None;
+                    u.status = format!("Update failed: {e}");
+                }
+            }
+            0
+        }
         WM_APP_OPEN_UI => {
             open_ui();
             0
@@ -429,6 +444,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
 pub fn run(control: Arc<Control>, opts: Opts) -> Result<(), String> {
     let class = wide(CLASS_NAME);
+    // Started by the previous version after a self-update: let it exit first.
+    if let Some(pid) = opts.flags.num::<u32>("after_update").ok().flatten() {
+        crate::winupdate::finish_after_update(pid);
+    }
     unsafe {
         // Single instance: hand over to the running one (it opens its UI).
         let existing = FindWindowW(class.as_ptr(), std::ptr::null());
@@ -538,6 +557,7 @@ pub fn run(control: Arc<Control>, opts: Opts) -> Result<(), String> {
             return Err("failed to install input hooks".into());
         }
         SetTimer(hwnd, TIMER_TICK, 100, None);
+        crate::winupdate::spawn(control.clone(), hwnd as isize);
 
         if !opts.flags.flag("no_tray") {
             let mut t = Tray::new(hwnd);

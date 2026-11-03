@@ -7,3 +7,5 @@ port = 4242
 # width = 1280
 # height = 800
 # verbose = true
+# Install signed updates from GitHub Releases automatically
+# auto_update = true

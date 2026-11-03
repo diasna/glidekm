@@ -31,6 +31,11 @@ pub fn status_path() -> PathBuf {
     runtime_dir().join("status")
 }
 
+/// The settings app creates this file to ask the client to check for updates now.
+pub fn update_request_path() -> PathBuf {
+    runtime_dir().join("update-request")
+}
+
 pub fn log_path() -> PathBuf {
     runtime_dir().join("client.log")
 }
@@ -99,6 +104,8 @@ pub struct ClientConfig {
     /// 0 = auto-detect
     pub width: u16,
     pub height: u16,
+    /// Install signed updates from GitHub Releases automatically.
+    pub auto_update: bool,
 }
 
 impl Default for ClientConfig {
@@ -108,6 +115,7 @@ impl Default for ClientConfig {
             port: crate::DEFAULT_PORT,
             width: 0,
             height: 0,
+            auto_update: true,
         }
     }
 }
@@ -119,6 +127,7 @@ impl ClientConfig {
             port: c.num::<u16>("port")?.unwrap_or(crate::DEFAULT_PORT),
             width: c.num::<u16>("width")?.unwrap_or(0),
             height: c.num::<u16>("height")?.unwrap_or(0),
+            auto_update: c.get("auto_update").is_none_or(|_| c.flag("auto_update")),
         };
         cfg.validate()?;
         Ok(cfg)
@@ -154,8 +163,8 @@ impl ClientConfig {
     pub fn to_file(&self) -> String {
         let mut s = format!(
             "# glidekm client configuration (written by glidekm Settings)\n\
-             passphrase = \"{}\"\nport = {}\n",
-            self.passphrase, self.port
+             passphrase = \"{}\"\nport = {}\nauto_update = {}\n",
+            self.passphrase, self.port, self.auto_update
         );
         if let Some((w, h)) = self.fixed_size() {
             s += &format!("width = {w}\nheight = {h}\n");
@@ -191,6 +200,12 @@ pub struct Status {
     pub net_error: String,
     pub input_error: String,
     pub last_rejected: String,
+    /// Human-readable update state ("" = nothing to report).
+    pub update_status: String,
+    /// Version of a newer release, if one was found.
+    pub update_available: String,
+    /// Updates can't be installed for this installation (e.g. Decky).
+    pub update_unsupported: bool,
 }
 
 fn one_line(s: &str) -> String {
@@ -202,7 +217,8 @@ impl Status {
         format!(
             "pid = {}\nversion = {}\nupdated = {}\nlistening = {}\nport = {}\nserver = {}\n\
              active = {}\ncapture = {}\nwidth = {}\nheight = {}\nscreen_auto = {}\n\
-             passphrase_set = {}\nnet_error = {}\ninput_error = {}\nlast_rejected = {}\n",
+             passphrase_set = {}\nnet_error = {}\ninput_error = {}\nlast_rejected = {}\n\
+             update_status = {}\nupdate_available = {}\nupdate_unsupported = {}\n",
             self.pid,
             one_line(&self.version),
             self.updated,
@@ -218,6 +234,9 @@ impl Status {
             one_line(&self.net_error),
             one_line(&self.input_error),
             one_line(&self.last_rejected),
+            one_line(&self.update_status),
+            one_line(&self.update_available),
+            self.update_unsupported,
         )
     }
 
@@ -240,6 +259,9 @@ impl Status {
             net_error: c.str_or("net_error", ""),
             input_error: c.str_or("input_error", ""),
             last_rejected: c.str_or("last_rejected", ""),
+            update_status: c.str_or("update_status", ""),
+            update_available: c.str_or("update_available", ""),
+            update_unsupported: c.flag("update_unsupported"),
         }
     }
 
@@ -262,6 +284,7 @@ mod tests {
             port: 5000,
             width: 1920,
             height: 1080,
+            auto_update: false,
         };
         assert_eq!(
             ClientConfig::from_config(&Config::parse(&c.to_file())).unwrap(),
@@ -298,6 +321,9 @@ mod tests {
             net_error: String::new(),
             input_error: "cannot open /dev/uinput: denied".into(),
             last_rejected: "x\ny".into(),
+            update_status: "Up to date".into(),
+            update_available: "0.2.0".into(),
+            update_unsupported: false,
         };
         let back = Status::parse(&s.to_file());
         assert_eq!(back.last_rejected, "x y");

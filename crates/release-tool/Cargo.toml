@@ -1,0 +1,11 @@
+[package]
+name = "glidekm-release"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Release signing tool for glidekm (used by CI)"
+publish = false
+
+[dependencies]
+glidekm-core = { path = "../core" }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }

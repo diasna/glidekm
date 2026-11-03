@@ -40,22 +40,22 @@ Download from the [Releases](../../releases) page (or the latest CI run's artifa
 ### 1. Windows (server)
 
 1. Unzip `glidekm-windows-x86_64.zip` somewhere permanent, e.g. `C:\Tools\glidekm`.
-2. Run `glidekm-server.exe`. It lives in the notification area (tray) and, on first run, opens its
-   **settings page** in your browser:
+2. Run `glidekm-server.exe`. It runs in the notification area (tray). On first run its **settings window**
+   opens:
    - **Arrangement** - drag the Steam Deck next to your monitors, like Windows display settings.
      The green line shows where the cursor can cross.
    - **Connection** - *Scan* finds Decks on your network (or type the IP / `steamdeck.local`), and set a
      passphrase (*Generate* makes one; enter the same on the Deck).
-   - **Behavior** - pointer speed on the Deck, hotkeys (click and press a combo), *Start with Windows*.
-   - *Save* applies everything immediately; the header shows live status and the *Log* section the server log.
-3. Tray icon: gray = not set up, amber = connecting, green = connected, blue = Deck in use.
-   Left-click opens settings; right-click for *Switch to Deck* / *Quit*.
+   - **Behavior** - pointer speed on the Deck, hotkeys (click a box and press the combination),
+     *Start with Windows*.
+   - **About** - automatic updates, *Check for updates*, config folder and log.
+   - *Save* applies everything immediately; the header shows the live connection status.
+3. Minimizing or closing the window hides it - glidekm keeps running in the tray. Tray icon: gray = not set
+   up, amber = connecting, green = connected, blue = Deck in use. Left-click opens settings; right-click for
+   *Switch to Deck* / *Quit*. Starting `glidekm-server.exe` again also just opens the settings.
 4. Optional: right-click `install-autostart.cmd` → *Run as administrator* to start at logon with
    highest privileges (needed for the hooks to work while an elevated window such as Task Manager has
    focus). The simpler *Start with Windows* checkbox runs it unelevated.
-
-The settings page is served only on `127.0.0.1` and needs a per-run secret that the tray link includes,
-so other websites or users cannot change your settings.
 
 ### 2a. Steam Deck - Decky Loader plugin (easiest, works in Game Mode)
 
@@ -64,7 +64,7 @@ so other websites or users cannot change your settings.
 2. Open the Quick Access menu → glidekm → enter the same passphrase → *Save* → toggle *Enabled*.
    The panel shows the Deck's IP to put in the PC config.
 
-The plugin runs as root, so no udev setup is needed.
+The plugin runs as root, so no udev setup is needed. Decky installs are updated by re-installing the zip.
 
 ### 2b. Steam Deck - Desktop Mode (no Decky)
 
@@ -74,26 +74,45 @@ In Desktop Mode open Konsole:
 tar xzf glidekm-steamos-x86_64.tar.gz && cd glidekm-steamos && ./install.sh
 ```
 
-This installs `~/.local/bin/glidekm-client`, a systemd **user** service (so it keeps running after you
-switch back to Game Mode) and a **glidekm Settings** entry in the app menu, then opens the settings page:
+This installs `glidekm-client` (the small background service, a systemd **user** service so it keeps
+running in Game Mode) and **glidekm Settings** (app menu → Settings / Utilities), then opens the settings:
 
 - **This Deck** - the address to enter on the PC (with a Copy button), plus `hostname.local`.
 - **Status** - live: connected PC, input access, screen size, network. If the virtual mouse/keyboard
-  can't be created, it shows the one-line fix to paste into Konsole (glidekm retries automatically).
+  can't be created, *Fix now…* asks for your password and allows it (or copy the one-line command).
   It also tells you when a PC tried to connect with a different passphrase.
 - **Settings** - passphrase (or *Generate*), UDP port, automatic or manual screen size, *Start automatically*.
-  *Save* applies immediately.
+- **Updates** - automatic updates and *Check for updates*.
 
-The page opens in your default browser, or in Steam's built-in browser if none is installed (SteamOS
-has none by default). If `/dev/uinput` is not accessible, the script installs a one-line udev rule
-(needs `sudo`; set a password first with `passwd`). Uninstall with `./install.sh --uninstall`.
+*Save* applies immediately: the settings app writes `~/.config/glidekm/client.conf` and the running client
+picks the change up within a second. Uninstall with `./install.sh --uninstall`.
 
 Use either the Decky plugin or the Desktop Mode service, not both - they would compete for the same port
-(the settings page says so if it happens).
+(glidekm Settings says so if it happens).
+
+## Updates
+
+The PC server and the Desktop Mode client update themselves from this repository's
+[GitHub Releases](../../releases) (checked about a minute after start, then every 6 hours, or with
+*Check for updates*). An update is installed only when:
+
+- the release manifest `glidekm-release.txt` carries a valid **Ed25519 signature** made with the project's
+  release key (the public key is built into the apps: `crates/core/release-key.pub`), and
+- the downloaded binary's SHA-256 matches the signed manifest.
+
+Updates install only while the Deck is not in use, then the app restarts itself. Turn off *Install updates
+automatically* to only be told about new versions.
+
+**Maintainers:** the release workflow signs the manifest with the `GLIDEKM_SIGNING_KEY` repository secret
+(*Settings → Secrets and variables → Actions*). To publish a release, create a tag `vX.Y.Z` (for example from
+*Releases → Draft a new release*) after bumping `version` in `Cargo.toml`; the workflow builds, signs and
+attaches everything. Without the secret, releases still publish but the apps won't auto-install them.
+A new key pair can be made with `cargo run -p glidekm-release -- keygen secret.txt crates/core/release-key.pub`
+(apps built with the old public key will then no longer accept updates).
 
 ## Configuration
 
-Normally you use the settings page. It writes `glidekm-server.conf` next to the exe, which you can also
+Normally you use the settings window. It writes `glidekm-server.conf` next to the exe, which you can also
 edit by hand (every key can be passed as `--key value` too; see `glidekm-server.conf.example`):
 
 | key | default | meaning |
@@ -105,25 +124,26 @@ edit by hand (every key can be passed as `--key value` too; see `glidekm-server.
 | `scale` | `1.0` | Windows px per Deck px (>1 = slower cursor on the Deck) |
 | `hotkey_switch` | `ctrl+alt+shift+s` | jump to/from the Deck |
 | `hotkey_capture` | `ctrl+alt+shift+m` | toggle game (relative) mouse mode |
-| `log_file`, `verbose` | `glidekm-server.log` next to the exe | logging |
-
-Command-line only: `--ui-port N` (default 24242), `--no-ui`, `--no-tray`, `--open-ui`, `--console` (show log in a console).
 | `ignore_injected` | `false` | don't let software-injected moves trigger edge switching |
+| `auto_update` | `true` | install signed updates automatically |
+
+Command line: `--open-ui`, `--no-tray`, `--console` (show the log in a console), `--log-file FILE`
+(default `glidekm-server.log` next to the exe), `--verbose`.
 
 Crossing only happens where a Windows monitor actually touches the Deck's
 edge, like a real monitor arrangement; elsewhere the edge is a wall.
 
-`~/.config/glidekm/client.conf` (written by the Deck's settings page): `passphrase`, `port` (4242), and
+`~/.config/glidekm/client.conf` (written by glidekm Settings): `passphrase`, `port` (4242), `auto_update`, and
 optional `width`/`height` to override the auto-detected logical screen size (the Deck panel's rotation
-and docked external displays are handled automatically). Command line: `--open-settings`, `--ui-port N`
-(default 24243), `--no-ui`, `--dry-run`, `--verbose`.
+and docked external displays are handled automatically). Client command line: `--dry-run`, `--verbose`,
+`--status-file FILE` (JSON status, used by the Decky plugin).
 
 ## Troubleshooting
 
-- **Nothing happens at the edge**: the tray icon must be green (check the status/log on the settings page). Both sides need the same passphrase;
-  a mismatch logs `handshake failed`. UDP 4242 must be reachable on the Deck.
-- **Cursor lands on the wrong spot on the Deck when docked with two displays (Desktop Mode)**: set `width`/`height`
-  on the client to the combined desktop size.
+- **Nothing happens at the edge**: the tray icon must be green (see the status line in the settings window).
+  Both sides need the same passphrase; a mismatch logs `handshake failed`. UDP 4242 must be reachable on the Deck.
+- **Cursor lands on the wrong spot on the Deck when docked with two displays (Desktop Mode)**: set the
+  screen size manually in glidekm Settings to the combined desktop size.
 - **Laggy on Wi-Fi**: disable Deck Wi-Fi power saving (`sudo iw dev wlan0 set power_save off`) or use ethernet.
 - **Windows cursor stays invisible after a crash**: start and stop the server once (it restores cursors at start),
   or Settings → Mouse pointer → reapply the scheme.
@@ -133,7 +153,8 @@ and docked external displays are handled automatically). Command line: `--open-s
 
 ```bash
 cargo test
-cargo build --release -p glidekm-client --target x86_64-unknown-linux-musl   # SteamOS
+cargo build --release -p glidekm-client --target x86_64-unknown-linux-musl   # SteamOS client (static)
+cargo build --release -p glidekm-settings                                     # SteamOS settings app
 cargo build --release -p glidekm-server --target x86_64-pc-windows-gnu       # Windows (needs mingw-w64)
 cd decky && pnpm install && pnpm build                                        # Decky frontend
 ```
@@ -143,7 +164,6 @@ Testing without hardware:
 ```bash
 glidekm-client --passphrase x --dry-run          # logs instead of injecting
 glidekm-server --simulate --client 127.0.0.1 --passphrase x   # (non-Windows) scripted input
-glidekm-server                                   # (non-Windows) headless: settings UI + networking only
 ```
 
 CI also runs the real Windows binary under Wine, driving its hooks with `SendInput` (`crates/server/examples/inject.rs`).
@@ -151,10 +171,13 @@ CI also runs the real Windows binary under Wine, driving its hooks with `SendInp
 ## Layout
 
 ```
-crates/core     wire format, Windows->evdev keymap, Noise session, config, logging, loopback HTTP for settings pages
-crates/client   uinput devices, screen detection, client state machine, Desktop Mode settings page
-crates/server   engine (platform independent state machine), layout math, networking, Windows hooks,
-                tray icon, settings UI (ui.rs + embedded ui.html)
+crates/core            wire format, Windows->evdev keymap, Noise session, config, logging,
+                       client<->settings file IPC, signed self-update
+crates/client          background client: uinput devices, screen detection, state machine, updater
+crates/settings-deck   glidekm Settings for SteamOS / Linux (egui)
+crates/server          engine (platform independent state machine), layout math, networking,
+                       Windows hooks, tray icon, native Win32 settings window, WinHTTP updater
+crates/release-tool    release manifest signing (used by CI)
 decky/          Decky Loader plugin (Python backend + React panel)
 dist/           install scripts and example configs
 ```

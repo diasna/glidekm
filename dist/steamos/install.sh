@@ -18,17 +18,18 @@ UDEV_RULE=/etc/udev/rules.d/60-glidekm-uinput.rules
 
 if [[ "${1:-}" == "--uninstall" ]]; then
   systemctl --user disable --now glidekm-client.service 2>/dev/null || true
-  rm -f "$UNIT_DIR/glidekm-client.service" "$BIN_DIR/glidekm-client" \
+  rm -f "$UNIT_DIR/glidekm-client.service" "$BIN_DIR/glidekm-client" "$BIN_DIR/glidekm-settings" \
     "$APP_DIR/glidekm-settings.desktop" "$ICON_DIR/glidekm.svg"
   systemctl --user daemon-reload || true
-  echo "Removed binary, service and menu entry. Config kept in $CONF_DIR."
+  echo "Removed binaries, service and menu entry. Config kept in $CONF_DIR."
   [[ -f $UDEV_RULE ]] && echo "To remove the udev rule: sudo rm $UDEV_RULE"
   exit 0
 fi
 
 mkdir -p "$BIN_DIR" "$CONF_DIR" "$UNIT_DIR" "$APP_DIR" "$ICON_DIR"
 install -m 755 "$HERE/glidekm-client" "$BIN_DIR/glidekm-client"
-echo "Installed $BIN_DIR/glidekm-client"
+install -m 755 "$HERE/glidekm-settings" "$BIN_DIR/glidekm-settings"
+echo "Installed glidekm-client and glidekm-settings to $BIN_DIR"
 
 # App-menu entry "glidekm Settings" (KDE menu: Settings / Utilities).
 install -m 644 "$HERE/glidekm.svg" "$ICON_DIR/glidekm.svg"
@@ -38,7 +39,8 @@ Type=Application
 Name=glidekm Settings
 GenericName=Mouse & keyboard sharing
 Comment=Use your PC's mouse and keyboard on this Deck
-Exec=$BIN_DIR/glidekm-client --open-settings
+Exec=$BIN_DIR/glidekm-settings
+StartupWMClass=glidekm-settings
 Icon=$ICON_DIR/glidekm.svg
 Terminal=false
 Categories=Settings;Utility;
@@ -51,7 +53,7 @@ echo "Added menu entry: glidekm Settings"
 
 # /dev/uinput access. Steam's own udev rules usually grant it to the active
 # user already; otherwise add a tiny rule (needs sudo; on a Deck, set a
-# password first with `passwd`). The settings page shows this too.
+# password first with `passwd`). glidekm Settings shows this too.
 if [[ ! -w /dev/uinput ]]; then
   echo "No write access to /dev/uinput - installing udev rule (sudo)."
   if echo 'KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"' |
@@ -87,5 +89,9 @@ sleep 1
 
 echo
 echo "Done. Opening glidekm Settings (also in the app menu) to set the passphrase..."
-"$BIN_DIR/glidekm-client" --open-settings || true
+if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+  nohup "$BIN_DIR/glidekm-settings" >/dev/null 2>&1 &
+else
+  echo "(no desktop session: open 'glidekm Settings' from the app menu later)"
+fi
 echo "Logs: journalctl --user -u glidekm-client -f"

@@ -41,6 +41,7 @@ struct Draft {
     auto_size: bool,
     width: u16,
     height: u16,
+    auto_update: bool,
 }
 
 impl Draft {
@@ -51,6 +52,7 @@ impl Draft {
             auto_size: c.fixed_size().is_none(),
             width: c.width,
             height: c.height,
+            auto_update: c.auto_update,
         }
     }
 }
@@ -155,6 +157,7 @@ impl App {
             port: d.port,
             width: if d.auto_size { 0 } else { d.width },
             height: if d.auto_size { 0 } else { d.height },
+            auto_update: d.auto_update,
         };
         match cfg.save(&self.path) {
             Ok(()) => {
@@ -486,6 +489,49 @@ impl eframe::App for App {
                                 }
                                 Err(e) => self.msg = Msg::Err(e),
                             }
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+
+                // ---- Updates
+                section(ui, "Updates", |ui| {
+                    let mine = env!("CARGO_PKG_VERSION");
+                    let running = st.as_ref().map(|s| s.version.clone()).unwrap_or_default();
+                    if !running.is_empty() && glidekm_core::update::newer(&running, mine) {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("glidekm was updated to {running}.")).color(green(dark)));
+                            if ui.button("Restart this window").clicked() {
+                                sys::restart_self();
+                            }
+                        });
+                    }
+                    ui.label(format!("glidekm {mine}"));
+                    match &st {
+                        Some(s) if s.update_unsupported => {
+                            ui.label(RichText::new(&s.update_status).weak());
+                        }
+                        Some(s) => {
+                            ui.checkbox(&mut self.draft.auto_update, "Install updates automatically (signed releases from GitHub)");
+                            ui.horizontal(|ui| {
+                                let label = if s.update_available.is_empty() {
+                                    "Check for updates".to_string()
+                                } else {
+                                    format!("Install {}", s.update_available)
+                                };
+                                if ui.button(label).clicked() {
+                                    match sys::request_update_check() {
+                                        Ok(()) => self.msg = Msg::Info("Checking for updates…".into()),
+                                        Err(e) => self.msg = Msg::Err(e),
+                                    }
+                                }
+                                if !s.update_status.is_empty() {
+                                    ui.label(RichText::new(&s.update_status).weak());
+                                }
+                            });
+                        }
+                        None => {
+                            ui.label(RichText::new("Start glidekm to check for updates.").weak());
                         }
                     }
                 });

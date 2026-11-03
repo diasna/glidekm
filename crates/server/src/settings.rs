@@ -54,6 +54,9 @@ const ID_AUTOSTART: u16 = 125;
 const ID_VERSION: u16 = 130;
 const ID_OPEN_CFG: u16 = 131;
 const ID_OPEN_LOG: u16 = 132;
+const ID_AUTOUPD: u16 = 133;
+const ID_CHECKUPD: u16 = 134;
+const ID_UPDSTATUS: u16 = 135;
 const ID_MSG: u16 = 140;
 const ID_REVERT: u16 = 141;
 const ID_SAVE: u16 = 142;
@@ -104,6 +107,7 @@ struct Draft {
     hk_switch: String,
     hk_capture: String,
     ignore_injected: bool,
+    auto_update: bool,
 }
 
 impl Draft {
@@ -117,6 +121,7 @@ impl Draft {
             hk_switch: c.hotkey_switch.clone(),
             hk_capture: c.hotkey_capture.clone(),
             ignore_injected: c.ignore_injected,
+            auto_update: c.auto_update,
         }
     }
 }
@@ -261,6 +266,7 @@ impl Ui {
         self.set_text(ID_OFFSET, &d.offset.to_string());
         self.set_text(ID_SPEEDVAL, &format!("{:.2}", d.scale_pct as f64 / 100.0));
         self.set_check(ID_IGNINJ, d.ignore_injected);
+        self.set_check(ID_AUTOUPD, d.auto_update);
         let auto = self.ctl.platform.lock().unwrap().autostart();
         self.set_check(ID_AUTOSTART, auto.unwrap_or(false));
         self.enable(ID_AUTOSTART, auto.is_some());
@@ -340,6 +346,13 @@ impl Ui {
                     [Side::Right, Side::Left, Side::Top, Side::Bottom][i.clamp(0, 3) as usize];
             }
             (ID_IGNINJ, BN_CLICKED) => self.draft.ignore_injected = self.checked(ID_IGNINJ),
+            (ID_AUTOUPD, BN_CLICKED) => self.draft.auto_update = self.checked(ID_AUTOUPD),
+            (ID_CHECKUPD, BN_CLICKED) => {
+                self.ctl.update_request.store(true, Ordering::SeqCst);
+                self.ctl.update.lock().unwrap().status = "Checking for updates…".into();
+                self.refresh_update();
+                return;
+            }
             (ID_AUTOSTART, BN_CLICKED) => {
                 let on = self.checked(ID_AUTOSTART);
                 let r = self.ctl.platform.lock().unwrap().set_autostart(on);
@@ -479,6 +492,7 @@ impl Ui {
             hotkey_switch: d.hk_switch.clone(),
             hotkey_capture: d.hk_capture.clone(),
             ignore_injected: d.ignore_injected,
+            auto_update: d.auto_update,
         };
         match self.ctl.apply(new) {
             Ok(()) => {
@@ -509,8 +523,28 @@ impl Ui {
         }
     }
 
+    fn refresh_update(&mut self) {
+        let u = self.ctl.update.lock().unwrap().clone();
+        if self.text(ID_UPDSTATUS) != u.status {
+            self.set_text(ID_UPDSTATUS, &u.status);
+        }
+        let label = match (&u.staged, u.available.is_empty()) {
+            (Some(v), _) => format!("Installing {v}…"),
+            (None, false) => format!("Install {}", u.available),
+            (None, true) => "Check for updates".to_string(),
+        };
+        if self.text(ID_CHECKUPD) != label {
+            self.set_text(ID_CHECKUPD, &label);
+        }
+        self.enable(
+            ID_CHECKUPD,
+            u.staged.is_none() && glidekm_core::update::enabled(),
+        );
+    }
+
     /// Periodic refresh: status header, switch button, hotkey polling.
     fn tick(&mut self) {
+        self.refresh_update();
         let st = self.ctl.status();
         let text = self.ctl.status_text();
         let capture = self.ctl.shared.capture.load(Ordering::Relaxed);
@@ -731,6 +765,30 @@ impl Ui {
             0,
             ID_VERSION,
             [476, 384, 380, 18],
+        );
+        self.add(
+            "BUTTON",
+            "Install updates automatically (signed releases from GitHub)",
+            chk,
+            0,
+            ID_AUTOUPD,
+            [476, 406, 384, 22],
+        );
+        self.add(
+            "BUTTON",
+            "Check for updates",
+            btn,
+            0,
+            ID_CHECKUPD,
+            [476, 432, 170, 26],
+        );
+        self.add(
+            "STATIC",
+            "",
+            SS_LEFT | SS_ENDELLIPSIS,
+            0,
+            ID_UPDSTATUS,
+            [476, 464, 384, 20],
         );
         self.add(
             "BUTTON",

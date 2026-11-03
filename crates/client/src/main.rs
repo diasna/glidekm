@@ -9,6 +9,7 @@ mod settings;
 mod sink;
 mod state;
 mod uinput;
+mod updater;
 
 use glidekm_core::config::Config;
 use glidekm_core::event::{encode_all, Event};
@@ -42,6 +43,7 @@ struct Daemon {
     cfg: ClientConfig,
     status: Status,
     json_status: Option<PathBuf>,
+    updater: updater::Updater,
 }
 
 fn run() -> Result<(), String> {
@@ -57,9 +59,19 @@ fn run() -> Result<(), String> {
     let mut flags = Config::default();
     flags.apply_args(&args);
     glidekm_core::log::set_verbose(flags.flag("verbose"));
-    // Mirror the log for glidekm Settings (fresh each start).
+    // Mirror the log for glidekm Settings (appended; restarted when > 1 MB).
     if ipc::private_dir(&ipc::runtime_dir()).is_ok() {
-        if let Ok(f) = std::fs::File::create(ipc::log_path()) {
+        let p = ipc::log_path();
+        let big = std::fs::metadata(&p)
+            .map(|m| m.len() > 1 << 20)
+            .unwrap_or(false);
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(!big)
+            .truncate(big)
+            .open(&p);
+        if let Ok(f) = f {
             glidekm_core::log::set_file(f);
         }
     }
@@ -90,6 +102,7 @@ fn run() -> Result<(), String> {
     } else {
         Output::Real(RetryUinput::new())
     };
+    let auto_update = cfg.auto_update;
     let mut d = Daemon {
         st: State::new(out, 1280, 800),
         watch,
@@ -100,6 +113,7 @@ fn run() -> Result<(), String> {
             ..Default::default()
         },
         json_status: flags.get("status_file").map(PathBuf::from),
+        updater: updater::Updater::spawn(auto_update),
     };
 
     // Each iteration (re)applies the configuration; `serve` returns when the
@@ -163,6 +177,20 @@ struct Peer {
 
 fn publish(d: &mut Daemon, peer: Option<&Peer>, rejected: &str) {
     d.st.sink.tick();
+    // Settings app asked for an update check.
+    if std::fs::remove_file(ipc::update_request_path()).is_ok() {
+        d.updater.request_now();
+    }
+    // Install a staged update only while nobody is using the Deck.
+    if !d.st.active {
+        d.updater.install_if_staged();
+    }
+    {
+        let u = d.updater.state.lock().unwrap();
+        d.status.update_status = u.status.clone();
+        d.status.update_available = u.available.clone();
+        d.status.update_unsupported = u.unsupported;
+    }
     let s = &mut d.status;
     s.updated = session::now_millis();
     s.server = peer.map(|p| p.addr.to_string()).unwrap_or_default();
@@ -304,6 +332,9 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
         if last_watch.elapsed() >= Duration::from_millis(500) {
             last_watch = Instant::now();
             if let Some(c) = d.watch.poll() {
+                d.updater
+                    .auto
+                    .store(c.auto_update, std::sync::atomic::Ordering::Relaxed);
                 if c != d.cfg {
                     info!(
                         "settings changed in {} - applying",

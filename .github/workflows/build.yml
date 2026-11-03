@@ -27,7 +27,8 @@ jobs:
       - run: cargo test
       - name: End-to-end (simulated server -> dry-run client)
         run: |
-          cargo build --release
+          cargo build --release -p glidekm-client -p glidekm-server
+          export XDG_RUNTIME_DIR=$RUNNER_TEMP/rt XDG_CONFIG_HOME=$RUNNER_TEMP/cfg
           ./target/release/glidekm-client --passphrase ci --port 4343 --width 1280 --height 800 --dry-run > client.log 2>&1 &
           sleep 0.5
           ./target/release/glidekm-server --simulate --client 127.0.0.1:4343 --passphrase ci
@@ -37,9 +38,11 @@ jobs:
           grep -q "key 35 down" client.log
           grep -q "rel 15 -4" client.log
           grep -q "key 30 up" client.log
+          grep -q "^listening = true" $XDG_RUNTIME_DIR/glidekm/status
 
   # Runs the real Windows server binary (low-level hooks, blocking, edge
-  # switching, hotkeys) under Wine, driven by SendInput, against the client.
+  # switching, hotkeys, native settings window) under Wine, driven by
+  # SendInput, against the Linux client.
   windows-e2e-wine:
     runs-on: ubuntu-latest
     steps:
@@ -51,37 +54,43 @@ jobs:
       - name: Install mingw, wine, xvfb
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 wine64 xvfb
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 wine64 xvfb xdotool imagemagick
       - run: cargo build --release -p glidekm-client
       - run: cargo build --release -p glidekm-server --target x86_64-pc-windows-gnu --bins --examples
       - name: Run under Wine
         run: |
           export DISPLAY=:99 WINEDEBUG=-all WINEPREFIX=$PWD/.wine
+          export XDG_RUNTIME_DIR=$RUNNER_TEMP/rt XDG_CONFIG_HOME=$RUNNER_TEMP/cfg
           WINE=$(command -v wine64 || echo /usr/lib/wine/wine64)
           Xvfb :99 -screen 0 1920x1080x24 &
           sleep 1
           timeout 180 $WINE wineboot -i || true
           ./target/release/glidekm-client --passphrase ci --port 4343 --width 1280 --height 800 --dry-run > client.log 2>&1 &
           W=target/x86_64-pc-windows-gnu/release
-          timeout 120 $WINE $W/glidekm-server.exe --client 127.0.0.1:4343 --passphrase ci --log-file server.log --verbose &
+          timeout 150 $WINE $W/glidekm-server.exe --client 127.0.0.1:4343 --passphrase ci --log-file server.log &
           for i in $(seq 1 30); do grep -q "client online" server.log 2>/dev/null && break; sleep 1; done
           timeout 60 $WINE $W/examples/inject.exe
           sleep 1
-          # Settings UI API on the real exe
-          URL=$(grep -o "http://127.0.0.1:[0-9]*/?t=[0-9a-f]*" server.log | head -1)
-          T=${URL##*t=}; B=${URL%%/?t=*}
-          test "$(curl -s -o /dev/null -w '%{http_code}' $B/api/state)" = 403
-          curl -sf -H "X-Token: $T" $B/api/state | tee state.json
-          grep -q '"status":"online"' state.json
-          curl -sf "$URL" | grep -q "Arrangement"
-          curl -sf -X POST -H "X-Token: $T" -d "side=left&offset=0" $B/api/config
-          grep -q "side = left" $W/glidekm-server.conf
+          # A second launch hands over to the running instance, which opens
+          # its native settings window.
+          timeout 30 $WINE $W/glidekm-server.exe --log-file second.log || true
+          grep -q "already running" second.log
+          for i in $(seq 1 20); do xdotool search --name "glidekm settings" >/dev/null && break; sleep 1; done
+          WID=$(xdotool search --name "glidekm settings" | head -1)
+          test -n "$WID"
+          timeout 20 import -window "$WID" settings-window.png || true
           echo "--- server"; cat server.log; echo "--- client"; cat client.log
           grep -q -- "-> client at (1, 500)" server.log
           grep -q "key 35 down" client.log
           grep -q "button 0x110 up" client.log
           grep -q "wheel v -120" client.log
           grep -q -- "-> client at (640, 400)" server.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wine-settings-window-screenshot
+          path: settings-window.png
+          if-no-files-found: ignore
 
   windows:
     runs-on: windows-latest
@@ -102,13 +111,17 @@ jobs:
           Copy-Item dist/windows/* out/glidekm-windows/
           Copy-Item README.md, LICENSE out/glidekm-windows/
           Compress-Archive -Path out/glidekm-windows -DestinationPath out/glidekm-windows-x86_64.zip
+          Copy-Item target/release/glidekm-server.exe out/
           Get-Item target/release/glidekm-server.exe | Select-Object Name, Length
       - uses: actions/upload-artifact@v4
         with:
           name: glidekm-windows-x86_64
-          path: out/glidekm-windows-x86_64.zip
+          path: |
+            out/glidekm-windows-x86_64.zip
+            out/glidekm-server.exe
 
-  steamos:
+  # Static client (no runtime deps) for SteamOS / any x86_64 Linux.
+  steamos-client:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -117,24 +130,56 @@ jobs:
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p glidekm-client --target x86_64-unknown-linux-musl
-      - name: Package
-        run: |
-          B=target/x86_64-unknown-linux-musl/release/glidekm-client
-          file "$B"; ls -l "$B"
-          mkdir -p out/glidekm-steamos
-          cp "$B" dist/steamos/install.sh dist/steamos/glidekm.svg dist/steamos/client.conf.example README.md LICENSE out/glidekm-steamos/
-          tar -C out -czf out/glidekm-steamos-x86_64.tar.gz glidekm-steamos
-      - uses: actions/upload-artifact@v4
-        with:
-          name: glidekm-steamos-x86_64
-          path: out/glidekm-steamos-x86_64.tar.gz
+      - run: file target/x86_64-unknown-linux-musl/release/glidekm-client
       - uses: actions/upload-artifact@v4
         with:
           name: client-binary
           path: target/x86_64-unknown-linux-musl/release/glidekm-client
 
+  # Settings app (GUI). Built on Debian bookworm so it needs only glibc 2.36,
+  # which every current SteamOS release has.
+  steamos-settings:
+    runs-on: ubuntu-latest
+    container: rust:1-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release -p glidekm-settings
+      - name: Check glibc requirement
+        run: |
+          objdump -T target/release/glidekm-settings | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+          ls -l target/release/glidekm-settings
+      - uses: actions/upload-artifact@v4
+        with:
+          name: settings-binary
+          path: target/release/glidekm-settings
+
+  steamos:
+    needs: [steamos-client, steamos-settings]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: client-binary
+          path: bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: settings-binary
+          path: bin
+      - name: Package
+        run: |
+          mkdir -p out/glidekm-steamos
+          install -m 755 bin/glidekm-client bin/glidekm-settings out/glidekm-steamos/
+          cp dist/steamos/install.sh dist/steamos/glidekm.svg dist/steamos/client.conf.example README.md LICENSE out/glidekm-steamos/
+          tar -C out -czf out/glidekm-steamos-x86_64.tar.gz glidekm-steamos
+          ls -l out/glidekm-steamos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glidekm-steamos-x86_64
+          path: out/glidekm-steamos-x86_64.tar.gz
+
   decky:
-    needs: steamos
+    needs: steamos-client
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -175,13 +220,33 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Signed update manifest
+        env:
+          GLIDEKM_SIGNING_KEY: ${{ secrets.GLIDEKM_SIGNING_KEY }}
+        run: |
+          mkdir -p upload
+          cp artifacts/glidekm-windows-x86_64/glidekm-server.exe upload/glidekm-server.exe
+          cp artifacts/client-binary/glidekm-client upload/glidekm-client-linux-x86_64
+          cp artifacts/settings-binary/glidekm-settings upload/glidekm-settings-linux-x86_64
+          cargo run -q --release -p glidekm-release -- manifest "${GITHUB_REF_NAME}" \
+            upload/glidekm-server.exe upload/glidekm-client-linux-x86_64 upload/glidekm-settings-linux-x86_64 \
+            > upload/glidekm-release.txt
+          cat upload/glidekm-release.txt
+          if [ -n "$GLIDEKM_SIGNING_KEY" ]; then
+            cargo run -q --release -p glidekm-release -- sign upload/glidekm-release.txt
+          else
+            echo "::warning::GLIDEKM_SIGNING_KEY secret is not set - this release cannot be auto-installed by the apps."
+          fi
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            artifacts/glidekm-windows-x86_64/*.zip
+            artifacts/glidekm-windows-x86_64/glidekm-windows-x86_64.zip
             artifacts/glidekm-steamos-x86_64/*.tar.gz
             artifacts/glidekm-decky/*.zip
+            upload/*

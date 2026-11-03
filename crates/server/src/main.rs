@@ -17,6 +17,8 @@ mod sim;
 mod tray;
 #[cfg(windows)]
 mod win;
+#[cfg(windows)]
+mod winupdate;
 
 use control::{Control, ServerConfig};
 use glidekm_core::config::Config;

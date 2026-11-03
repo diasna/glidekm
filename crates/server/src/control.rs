@@ -6,7 +6,7 @@ use crate::layout::{Rect, Side};
 use crate::net::Shared;
 use glidekm_core::config::Config;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19,6 +19,8 @@ pub struct ServerConfig {
     pub hotkey_switch: String,
     pub hotkey_capture: String,
     pub ignore_injected: bool,
+    /// Install signed updates from GitHub Releases automatically.
+    pub auto_update: bool,
 }
 
 impl Default for ServerConfig {
@@ -32,6 +34,7 @@ impl Default for ServerConfig {
             hotkey_switch: "ctrl+alt+shift+s".into(),
             hotkey_capture: "ctrl+alt+shift+m".into(),
             ignore_injected: false,
+            auto_update: true,
         }
     }
 }
@@ -68,6 +71,7 @@ impl ServerConfig {
             hotkey_switch: c.str_or("hotkey_switch", &d.hotkey_switch),
             hotkey_capture: c.str_or("hotkey_capture", &d.hotkey_capture),
             ignore_injected: c.flag("ignore_injected"),
+            auto_update: c.get("auto_update").is_none_or(|_| c.flag("auto_update")),
         };
         cfg.engine_params()?;
         Ok(cfg)
@@ -120,7 +124,8 @@ impl ServerConfig {
              scale = {}\n\
              hotkey_switch = {}\n\
              hotkey_capture = {}\n\
-             ignore_injected = {}\n",
+             ignore_injected = {}\n\
+             auto_update = {}\n",
             self.client.trim(),
             self.passphrase,
             side_name(self.side),
@@ -128,7 +133,8 @@ impl ServerConfig {
             self.scale,
             self.hotkey_switch,
             self.hotkey_capture,
-            self.ignore_injected
+            self.ignore_injected,
+            self.auto_update
         )
     }
 }
@@ -153,12 +159,25 @@ impl Platform for NoPlatform {
     fn config_changed(&self) {}
 }
 
+/// Self-update state shown in the settings window.
+#[derive(Debug, Default, Clone)]
+pub struct UpdateInfo {
+    pub status: String,
+    /// Newer version found, if any.
+    pub available: String,
+    /// Version downloaded, verified and waiting to be installed.
+    pub staged: Option<String>,
+}
+
 pub struct Control {
     pub path: PathBuf,
     pub cfg: Mutex<ServerConfig>,
     pub shared: Arc<Shared>,
     pub monitors: Mutex<Vec<Rect>>,
     pub platform: Mutex<Box<dyn Platform>>,
+    pub update: Mutex<UpdateInfo>,
+    /// Set by the settings window: check (and install) updates now.
+    pub update_request: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +196,8 @@ impl Control {
             shared,
             monitors: Mutex::new(Vec::new()),
             platform: Mutex::new(Box::new(NoPlatform)),
+            update: Mutex::new(UpdateInfo::default()),
+            update_request: AtomicBool::new(false),
         });
         c.push_target();
         c
@@ -250,6 +271,7 @@ mod tests {
             offset: -120,
             scale: 1.5,
             ignore_injected: true,
+            auto_update: false,
             ..Default::default()
         };
         let back = ServerConfig::from_config(&Config::parse(&c.to_file())).unwrap();

@@ -138,3 +138,23 @@ pub fn tail(p: &Path, n: usize) -> Vec<String> {
         .map(|s| s.to_string())
         .collect()
 }
+
+/// Ask the background client to check for (and install) updates now.
+pub fn request_update_check() -> Result<(), String> {
+    glidekm_core::ipc::write_private(&glidekm_core::ipc::update_request_path(), "1")
+        .map_err(|e| format!("cannot reach glidekm: {e}"))
+}
+
+/// Re-run this program (after an update replaced the binary).
+pub fn restart_self() -> ! {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/proc/self/exe"));
+    let exe = PathBuf::from(
+        exe.to_string_lossy()
+            .trim_end_matches(" (deleted)")
+            .to_string(),
+    );
+    let err = Command::new(exe).args(std::env::args().skip(1)).exec();
+    eprintln!("restart failed: {err}");
+    std::process::exit(1)
+}

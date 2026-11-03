@@ -22,3 +22,6 @@ hotkey_capture = ctrl+alt+shift+m
 # verbose = true
 # Ignore software-injected mouse moves for edge switching (default: false)
 # ignore_injected = true
+
+# Install signed updates from GitHub Releases automatically
+# auto_update = true
