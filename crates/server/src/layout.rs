@@ -213,6 +213,84 @@ impl Layout {
     }
 }
 
+/// Arrangement-editor helpers (used by the settings window).
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Layout {
+    /// Parts of the attached edge where the cursor can cross, as
+    /// [lo, hi) ranges along that edge (Windows px).
+    pub fn shared_segments(&self) -> Vec<(f64, f64)> {
+        let d = self.desktop();
+        let (cx, cy, cw, ch) = self.client_rect();
+        let mut v = Vec::new();
+        for m in &self.monitors {
+            let (touches, lo, hi) = match self.side {
+                Side::Right => (m.r == d.r, (m.t as f64).max(cy), (m.b as f64).min(cy + ch)),
+                Side::Left => (m.l == d.l, (m.t as f64).max(cy), (m.b as f64).min(cy + ch)),
+                Side::Bottom => (m.b == d.b, (m.l as f64).max(cx), (m.r as f64).min(cx + cw)),
+                Side::Top => (m.t == d.t, (m.l as f64).max(cx), (m.r as f64).min(cx + cw)),
+            };
+            if touches && hi > lo {
+                v.push((lo, hi));
+            }
+        }
+        v
+    }
+
+    /// Given a proposed top-left corner for the client rectangle while
+    /// dragging, snap it to the nearest desktop side and return (side,
+    /// offset). Offsets within `magnet` px of aligning with a monitor edge or
+    /// center snap to it.
+    pub fn snap(&self, x: f64, y: f64, magnet: f64) -> (Side, i32) {
+        let d = self.desktop();
+        let (w, h) = (
+            self.client_w as f64 * self.scale,
+            self.client_h as f64 * self.scale,
+        );
+        let (dl, dt, dr, db) = (d.l as f64, d.t as f64, d.r as f64, d.b as f64);
+        let cy = y.clamp(dt - h + 1.0, db - 1.0);
+        let cx = x.clamp(dl - w + 1.0, dr - 1.0);
+        let cands = [
+            (Side::Right, dr, cy),
+            (Side::Left, dl - w, cy),
+            (Side::Bottom, cx, db),
+            (Side::Top, cx, dt - h),
+        ];
+        let (side, bx, by) = cands
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                let da = (a.1 - x).hypot(a.2 - y);
+                let db_ = (b.1 - x).hypot(b.2 - y);
+                da.total_cmp(&db_)
+            })
+            .unwrap();
+        let vertical = matches!(side, Side::Left | Side::Right);
+        let mut off = if vertical { by - dt } else { bx - dl };
+        let mut snaps = vec![0.0];
+        for m in &self.monitors {
+            let (ml, mt, mr, mb) = (m.l as f64, m.t as f64, m.r as f64, m.b as f64);
+            let on_edge = match side {
+                Side::Right => m.r == d.r,
+                Side::Left => m.l == d.l,
+                Side::Bottom => m.b == d.b,
+                Side::Top => m.t == d.t,
+            };
+            if !on_edge {
+                continue;
+            }
+            if vertical {
+                snaps.extend([mt - dt, mb - dt - h, (mt + mb - h) / 2.0 - dt]);
+            } else {
+                snaps.extend([ml - dl, mr - dl - w, (ml + mr - w) / 2.0 - dl]);
+            }
+        }
+        if let Some(s) = snaps.iter().find(|s| (*s - off).abs() < magnet) {
+            off = *s;
+        }
+        (side, off.round() as i32)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +368,20 @@ mod tests {
             l.step((0.0, 100.0), (-3.0, 0.0)),
             Step::Exit(_, 700)
         ));
+    }
+
+    #[test]
+    fn editor_helpers() {
+        let l = layout(); // right side, offset 280, monitor 2 is 0..1080 tall
+        assert_eq!(l.shared_segments(), vec![(280.0, 1080.0)]);
+        // dragged near the right edge, slightly below: stays right
+        assert_eq!(l.snap(4500.0, 300.0, 1.0), (Side::Right, 300));
+        // magnet aligns with the top of monitor 2
+        assert_eq!(l.snap(4490.0, 20.0, 40.0), (Side::Right, 0));
+        // dragged below the desktop: bottom side, x offset
+        assert_eq!(l.snap(1000.0, 1500.0, 1.0), (Side::Bottom, 1000));
+        // far left
+        assert_eq!(l.snap(-1400.0, 500.0, 1.0), (Side::Left, 500));
     }
 
     #[test]

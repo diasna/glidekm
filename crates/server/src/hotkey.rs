@@ -38,6 +38,50 @@ impl Hotkey {
     pub fn matches(&self, mods: u8, vk: u32) -> bool {
         self.vk == vk && self.mods == mods
     }
+
+    /// Config-file form, e.g. "ctrl+alt+shift+s". None if the key has no name.
+    pub fn to_config(self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        for (bit, name) in [
+            (MOD_CTRL, "ctrl"),
+            (MOD_ALT, "alt"),
+            (MOD_SHIFT, "shift"),
+            (MOD_WIN, "win"),
+        ] {
+            if self.mods & bit != 0 {
+                parts.push(name.into());
+            }
+        }
+        parts.push(vk_name(self.vk)?);
+        Some(parts.join("+"))
+    }
+}
+
+fn vk_name(vk: u32) -> Option<String> {
+    Some(match vk {
+        0x30..=0x39 => ((vk as u8) as char).to_string(),
+        0x41..=0x5A => ((vk as u8).to_ascii_lowercase() as char).to_string(),
+        0x70..=0x87 => format!("f{}", vk - 0x70 + 1),
+        0x20 => "space".into(),
+        0x09 => "tab".into(),
+        0x1B => "esc".into(),
+        0x0D => "enter".into(),
+        0x08 => "backspace".into(),
+        0x91 => "scrolllock".into(),
+        0x13 => "pause".into(),
+        0x2D => "insert".into(),
+        0x2E => "delete".into(),
+        0x24 => "home".into(),
+        0x23 => "end".into(),
+        0x21 => "pageup".into(),
+        0x22 => "pagedown".into(),
+        0x25 => "left".into(),
+        0x26 => "up".into(),
+        0x27 => "right".into(),
+        0x28 => "down".into(),
+        0xC0 => "`".into(),
+        _ => return None,
+    })
 }
 
 fn key_vk(k: &str) -> Option<u32> {
@@ -107,5 +151,15 @@ mod tests {
         assert!(Hotkey::parse("ctrl+").is_err());
         assert!(Hotkey::parse("ctrl+a+b").is_err());
         assert_eq!(vk_modifier(0xA3), MOD_CTRL);
+        for t in [
+            "ctrl+alt+shift+s",
+            "win+f12",
+            "scrolllock",
+            "ctrl+`",
+            "alt+pagedown",
+            "shift+7",
+        ] {
+            assert_eq!(Hotkey::parse(t).unwrap().to_config().unwrap(), t);
+        }
     }
 }

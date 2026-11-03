@@ -153,7 +153,7 @@ fn update_tray() {
 }
 
 fn open_ui() {
-    tray::open_url(&ctl().ui_url.lock().unwrap());
+    crate::settings::show(ctl().clone());
 }
 
 fn show_tray_menu() {
@@ -483,7 +483,7 @@ pub fn run(control: Arc<Control>, opts: Opts) -> Result<(), String> {
             std::ptr::null(),
         );
         if hwnd.is_null() {
-            return Err("CreateWindowExW failed".into());
+            return Err(format!("CreateWindowExW failed (error {})", GetLastError()));
         }
         HWND_MAIN.with(|h| h.set(hwnd));
         *control.platform.lock().unwrap() = Box::new(WinPlatform {
@@ -492,7 +492,7 @@ pub fn run(control: Arc<Control>, opts: Opts) -> Result<(), String> {
         let tc = wide("TaskbarCreated");
         TASKBAR_CREATED.with(|c| c.set(RegisterWindowMessageW(tc.as_ptr())));
 
-        let tx = crate::start_services(&control, &opts)?;
+        let tx = crate::start_services(&control)?;
         let layout = Layout {
             monitors: mons,
             side: p.side,

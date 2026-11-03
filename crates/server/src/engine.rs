@@ -356,12 +356,16 @@ impl Engine {
             self.swallow[vki] = false;
             return true;
         }
-        if down && self.hk_switch.matches(mods_before, vk) {
+        #[cfg(windows)]
+        let paused = crate::settings::PAUSE_HOTKEYS.load(Ordering::Relaxed);
+        #[cfg(not(windows))]
+        let paused = false;
+        if down && !paused && self.hk_switch.matches(mods_before, vk) {
             self.swallow[vki] = true;
             self.toggle();
             return true;
         }
-        if down && self.hk_capture.matches(mods_before, vk) {
+        if down && !paused && self.hk_capture.matches(mods_before, vk) {
             if let Mode::Remote { pos, capture } = self.mode {
                 self.swallow[vki] = true;
                 let capture = !capture;

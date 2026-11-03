@@ -7,18 +7,21 @@ mod engine;
 mod hotkey;
 mod layout;
 mod net;
+#[cfg(windows)]
+mod scan;
+#[cfg(windows)]
+mod settings;
 #[cfg(not(windows))]
 mod sim;
 #[cfg(windows)]
 mod tray;
-mod ui;
 #[cfg(windows)]
 mod win;
 
 use control::{Control, ServerConfig};
 use glidekm_core::config::Config;
 use glidekm_core::event::Event;
-use glidekm_core::{debug, info, warn};
+use glidekm_core::{info, warn};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -26,8 +29,8 @@ use std::sync::Arc;
 pub const USAGE: &str = "glidekm-server [--config FILE] [--client HOST[:PORT]] [--passphrase P]
                 [--side right|left|top|bottom] [--offset PX] [--scale F]
                 [--hotkey-switch ctrl+alt+shift+s] [--hotkey-capture ctrl+alt+shift+m]
-                [--ui-port N] [--no-ui] [--open-ui] [--console] [--log-file FILE] [--verbose]
-Settings are normally edited in the settings page (tray icon -> Open settings).
+                [--open-ui] [--console] [--log-file FILE] [--verbose]
+Settings are normally edited in the settings window (tray icon -> Open settings).
 Config file default: glidekm-server.conf next to the executable.";
 
 /// Command-line / runtime options that are not part of the saved config.
@@ -35,25 +38,16 @@ pub struct Opts {
     pub flags: Config,
 }
 
-fn exe_dir() -> PathBuf {
+pub fn exe_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Start networking and the settings UI. Returns the input channel.
-pub fn start_services(ctl: &Arc<Control>, opts: &Opts) -> Result<Sender<Event>, String> {
-    let tx = net::spawn(ctl.shared.clone()).map_err(|e| format!("network: {e}"))?;
-    if !opts.flags.flag("no_ui") {
-        let port = opts
-            .flags
-            .num::<u16>("ui_port")?
-            .unwrap_or(ui::DEFAULT_UI_PORT);
-        let url = ui::spawn(ctl.clone(), port).map_err(|e| format!("settings UI: {e}"))?;
-        debug!("settings UI url: {url}");
-    }
-    Ok(tx)
+/// Start networking. Returns the input channel.
+pub fn start_services(ctl: &Arc<Control>) -> Result<Sender<Event>, String> {
+    net::spawn(ctl.shared.clone()).map_err(|e| format!("network: {e}"))
 }
 
 fn main() {

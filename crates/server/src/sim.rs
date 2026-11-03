@@ -47,25 +47,16 @@ fn parse_monitors(s: &str) -> Option<Vec<Rect>> {
 
 pub fn run(ctl: Arc<Control>, opts: Opts) -> Result<(), String> {
     let simulate = opts.flags.flag("simulate");
-    let default = if simulate {
-        "0,0,1920,1080"
-    } else {
-        "0,0,2560,1440;2560,180,4480,1260"
-    };
-    let monitors =
-        parse_monitors(&opts.flags.str_or("monitors", default)).ok_or("invalid --monitors")?;
+    let monitors = parse_monitors(&opts.flags.str_or("monitors", "0,0,1920,1080"))
+        .ok_or("invalid --monitors")?;
     *ctl.monitors.lock().unwrap() = monitors.clone();
-    let tx = crate::start_services(&ctl, &opts)?;
     if !simulate {
-        // Headless mode (non-Windows): networking + settings UI only, for
-        // developing and testing the UI.
-        let url = ctl.ui_url.lock().unwrap().clone();
-        info!("headless mode (no input capture on this OS). Settings: {url}");
-        println!("{url}");
-        loop {
-            std::thread::sleep(Duration::from_secs(3600));
-        }
+        return Err(
+            "glidekm-server captures input only on Windows. On other systems use --simulate for testing."
+                .into(),
+        );
     }
+    let tx = crate::start_services(&ctl)?;
     let shared = ctl.shared.clone();
     let p = ctl.cfg.lock().unwrap().engine_params()?;
     if !shared.configured() {
