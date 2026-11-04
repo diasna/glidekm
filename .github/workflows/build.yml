@@ -67,6 +67,9 @@ jobs:
           timeout 180 $WINE wineboot -i || true
           ./target/release/glidekm-client --passphrase ci --port 4343 --width 1280 --height 800 --dry-run > client.log 2>&1 &
           W=target/x86_64-pc-windows-gnu/release
+          # An existing config file = not a first run, so the settings window
+          # (which pauses hotkeys while focused) doesn't open by itself.
+          touch $W/glidekm-server.conf
           timeout 150 $WINE $W/glidekm-server.exe --client 127.0.0.1:4343 --passphrase ci --log-file server.log &
           for i in $(seq 1 30); do grep -q "client online" server.log 2>/dev/null && break; sleep 1; done
           timeout 60 $WINE $W/examples/inject.exe
