@@ -241,7 +241,7 @@ impl Ui {
         self.set_text(ID_ADDR, &d.client);
         self.set_text(ID_PASS, &d.pass);
         let cue = wide(if self.ctl.cfg.lock().unwrap().passphrase.is_empty() {
-            "required - same as on the Deck"
+            "none - pairs with any glidekm Deck"
         } else {
             "•••••••• (unchanged)"
         });
@@ -675,7 +675,7 @@ impl Ui {
             [24, 404, 330, 200],
         );
         self.add("BUTTON", "Scan", btn, 0, ID_SCAN, [360, 403, 80, 26]);
-        lbl(self, "Passphrase", [24, 438, 410, 18]);
+        lbl(self, "Passphrase (optional)", [24, 438, 410, 18]);
         self.add(
             "EDIT",
             "",
@@ -695,7 +695,7 @@ impl Ui {
         );
         lbl(
             self,
-            "Use the same passphrase on the Deck. It encrypts everything you type.",
+            "Optional. Only Decks with the same passphrase can pair with this PC.",
             [24, 490, 416, 34],
         );
 
@@ -1480,9 +1480,9 @@ unsafe fn run(ctl: Arc<Control>) {
         u.build();
         u.relayout();
         u.fill();
-        if !u.ctl.cfg.lock().unwrap().configured() {
+        if !u.ctl.path.exists() {
             u.set_msg(
-                "Choose a passphrase (the same as on the Deck) and Save - the Deck is found automatically.",
+                "Nothing to set up: start glidekm on the Deck and it is found automatically.",
                 MsgKind::Info,
             );
         }
@@ -1490,11 +1490,6 @@ unsafe fn run(ctl: Arc<Control>) {
     });
     SetTimer(hwnd, TIMER_REFRESH, 500, None);
     bring_up(hwnd);
-    with_ui(|u| {
-        if u.ctl.cfg.lock().unwrap().passphrase.is_empty() {
-            SetFocus(u.item(ID_PASS));
-        }
-    });
 
     let mut msg: MSG = std::mem::zeroed();
     while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {

@@ -91,9 +91,6 @@ fn run() -> Result<(), String> {
         warn!("config: {e} - using defaults");
         ClientConfig::default()
     });
-    if cfg.passphrase.is_empty() {
-        warn!("no passphrase set - open glidekm Settings to set one");
-    }
 
     let out = if flags.flag("dry_run") {
         Output::Dry(Recorder {
@@ -152,7 +149,7 @@ fn run() -> Result<(), String> {
                 ""
             }
         );
-        let psk = (!d.cfg.passphrase.is_empty()).then(|| session::derive_psk(&d.cfg.passphrase));
+        let psk = Some(session::psk_for(&d.cfg.passphrase));
         match UdpSocket::bind(("0.0.0.0", d.cfg.port)) {
             Ok(sock) => {
                 sock.set_read_timeout(Some(Duration::from_millis(100))).ok();

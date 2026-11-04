@@ -77,10 +77,10 @@ impl ServerConfig {
         Ok(cfg)
     }
 
-    /// Only the passphrase is required: with no address the Deck is found
-    /// automatically on the local network.
+    /// Nothing is required: with no address the Deck is found automatically,
+    /// and with no passphrase the built-in default pairing key is used.
     pub fn configured(&self) -> bool {
-        !self.passphrase.is_empty()
+        true
     }
 
     pub fn engine_params(&self) -> Result<EngineParams, String> {
@@ -210,7 +210,7 @@ impl Control {
         if cfg.configured() {
             self.shared.set_target(
                 cfg.client.trim(),
-                glidekm_core::session::derive_psk(&cfg.passphrase),
+                glidekm_core::session::psk_for(&cfg.passphrase),
             );
         }
     }
@@ -230,7 +230,7 @@ impl Control {
     pub fn status_text(&self) -> String {
         let peer = self.shared.peer.lock().unwrap().map(|a| a.to_string());
         match self.status() {
-            Status::Unconfigured => "Not set up - choose a passphrase".into(),
+            Status::Unconfigured => "Starting…".into(),
             Status::Connecting => {
                 let e = self.shared.last_error.lock().unwrap().clone();
                 if !e.is_empty() {
@@ -310,6 +310,8 @@ mod tests {
             ..Default::default()
         };
         assert!(c.validate().is_err());
-        assert!(!ServerConfig::default().configured());
+        // Zero configuration is valid: automatic discovery + default key.
+        assert!(ServerConfig::default().configured());
+        assert!(ServerConfig::default().validate().is_ok());
     }
 }

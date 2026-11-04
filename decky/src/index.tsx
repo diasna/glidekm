@@ -77,8 +77,6 @@ function Content() {
           <ToggleField
             label="Enabled"
             checked={st.enabled}
-            disabled={!st.passphrase_set}
-            description={st.passphrase_set ? undefined : "Set a passphrase first"}
             onChange={async (v) => setSt(await setEnabled(v))}
           />
         </PanelSectionRow>
@@ -101,7 +99,7 @@ function Content() {
       <PanelSection title="Settings">
         <PanelSectionRow>
           <TextField
-            label={st.passphrase_set ? "Passphrase (set — type to change)" : "Passphrase"}
+            label={st.passphrase_set ? "Passphrase (set — type to change)" : "Passphrase (optional)"}
             value={pass}
             bIsPassword
             onChange={(e) => setPass(e.target.value)}

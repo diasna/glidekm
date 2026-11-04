@@ -123,9 +123,6 @@ class Plugin:
 
     async def set_enabled(self, enabled: bool) -> dict:
         s = _load()
-        if enabled and not s["passphrase"]:
-            self.error = "set a passphrase first"
-            return await self.get_state()
         s["enabled"] = bool(enabled)
         _save(s)
         if enabled:
@@ -148,9 +145,8 @@ class Plugin:
 
     async def _main(self):
         s = _load()
-        if s["passphrase"]:
-            _save(s)  # regenerate client.conf
-        if s["enabled"] and s["passphrase"]:
+        _save(s)  # regenerate client.conf
+        if s["enabled"]:
             try:
                 await self._start()
             except Exception as e:  # noqa: BLE001

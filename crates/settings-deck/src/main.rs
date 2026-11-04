@@ -111,9 +111,7 @@ impl App {
         if app.status.is_none() {
             app.start_client();
         }
-        if app.saved_cfg.passphrase.is_empty() {
-            app.msg = Msg::Info("Set a passphrase (the same as on the PC), then Save.".into());
-        }
+
         app
     }
 
@@ -243,9 +241,7 @@ impl eframe::App for App {
                 ui.add_space(12.0);
                 let (color, text) = match &st {
                     None => (red(dark), "Not running".to_string()),
-                    Some(_) if !passphrase_set => {
-                        (Color32::GRAY, "Set a passphrase to start".into())
-                    }
+
                     Some(s) if !s.input_error.is_empty() => (red(dark), "No input access".into()),
                     Some(s) if !s.net_error.is_empty() => (red(dark), "Network problem".into()),
                     Some(s) if s.active => (
@@ -366,7 +362,7 @@ impl eframe::App for App {
                                     .color(green(dark)),
                             ),
                             Some(s) if !s.last_rejected.is_empty() => ui.label(RichText::new(&s.last_rejected).color(red(dark))),
-                            Some(_) if !passphrase_set => ui.label(RichText::new("Set a passphrase first").color(amber(dark))),
+
                             Some(_) => ui.label(RichText::new("Waiting for the PC").color(amber(dark))),
                             None => ui.label("–"),
                         };
@@ -437,9 +433,9 @@ impl eframe::App for App {
                             .weak(),
                     );
                     ui.add_space(2.0);
-                    ui.label(RichText::new("Passphrase").strong());
+                    ui.label(RichText::new("Passphrase (optional)").strong());
                     ui.horizontal(|ui| {
-                        let hint = if passphrase_set { "•••••••• (unchanged)" } else { "required — same as on the PC" };
+                        let hint = if passphrase_set { "•••••••• (unchanged)" } else { "optional - only needed to restrict pairing" };
                         ui.add(
                             egui::TextEdit::singleline(&mut self.draft.pass)
                                 .password(!self.show_pass)

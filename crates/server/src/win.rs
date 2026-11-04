@@ -596,7 +596,7 @@ pub fn run(control: Arc<Control>, opts: Opts) -> Result<(), String> {
             tray::spawn(control.clone(), hwnd);
         }
         info!("ready - hooks installed");
-        if !control.cfg.lock().unwrap().configured() || opts.flags.flag("open_ui") {
+        if !control.path.exists() || opts.flags.flag("open_ui") {
             open_ui();
         }
 

@@ -7,7 +7,8 @@ it back and it returns. Works in **SteamOS Game Mode** (gamescope) and
 Desktop Mode.
 
 - Tiny: ~0.5 MB Windows exe, ~0.6 MB static Linux binary. No runtime deps, no async runtime.
-- Encrypted + authenticated (Noise `NNpsk0`, ChaCha20-Poly1305) with a shared passphrase.
+- **Zero configuration:** start it on both machines and they find each other on the local network.
+- Encrypted (Noise `NNpsk0`, ChaCha20-Poly1305); an optional passphrase restricts who can pair.
 - One job only: mouse + keyboard. No clipboard, no file transfer.
 
 ## How it works
@@ -44,9 +45,9 @@ Download from the [Releases](../../releases) page (or the latest CI run's artifa
    opens:
    - **Arrangement** - drag the Steam Deck next to your monitors, like Windows display settings.
      The green line shows where the cursor can cross.
-   - **Connection** - set a passphrase (*Generate* makes one) and enter the same one on the Deck. That's
-     all: with the address left empty, the PC **finds the Deck automatically** on your network. Enter an
-     address (or pick one with *Scan*) only if discovery can't reach it, e.g. across subnets or a VPN.
+   - **Connection** - nothing to fill in: with the address left empty, the PC **finds the Deck
+     automatically** on your network. Enter an address (or pick one with *Scan*) only if discovery can't
+     reach it, e.g. across subnets or a VPN. *Passphrase* is optional (see below).
    - **Behavior** - pointer speed on the Deck, hotkeys (click a box and press the combination),
      *Start with Windows*.
    - **About** - automatic updates, *Check for updates*, config folder and log.
@@ -62,7 +63,7 @@ Download from the [Releases](../../releases) page (or the latest CI run's artifa
 
 1. In Decky settings enable *Developer mode*, then *Developer → Install plugin from ZIP* and pick `glidekm-decky.zip`
    (copy it to the Deck first, e.g. to `~/Downloads`).
-2. Open the Quick Access menu → glidekm → enter the same passphrase → *Save* → toggle *Enabled*.
+2. Open the Quick Access menu → glidekm → toggle *Enabled*. (A passphrase is optional.)
    The panel shows the Deck's IP to put in the PC config.
 
 The plugin runs as root, so no udev setup is needed. Decky installs are updated by re-installing the zip.
@@ -82,7 +83,7 @@ running in Game Mode) and **glidekm Settings** (app menu → Settings / Utilitie
 - **Status** - live: connected PC, input access, screen size, network. If the virtual mouse/keyboard
   can't be created, *Fix now…* asks for your password and allows it (or copy the one-line command).
   It also tells you when a PC tried to connect with a different passphrase.
-- **Settings** - passphrase (or *Generate*), UDP port, automatic or manual screen size, *Start automatically*.
+- **Settings** - optional passphrase, UDP port, automatic or manual screen size, *Start automatically*.
 - **Updates** - automatic updates and *Check for updates*.
 
 *Save* applies immediately: the settings app writes `~/.config/glidekm/client.conf` and the running client
@@ -95,9 +96,14 @@ Use either the Decky plugin or the Desktop Mode service, not both - they would c
 
 With no address configured, the PC broadcasts a small discovery probe every few seconds, and an
 unconnected Deck also announces itself every 3 seconds (UDP 4242, local network only). The PC then
-attempts the encrypted handshake with every Deck it found; only a Deck with the same passphrase can
-complete it, so that's the one it connects to. A Deck with a different passphrase is shown as
-"Found …, but the passphrase doesn't match". If the Deck's IP changes, it's simply found again.
+attempts the encrypted handshake with every Deck it found and connects to the first one that completes
+it. If the Deck's IP changes, it's simply found again.
+
+**Passphrase (optional).** Without one, both sides use a built-in default key: traffic is still
+encrypted with fresh keys per session, but any glidekm Deck on the same network can pair with your PC.
+On a shared network (dorm, office) set the same passphrase on both sides; then only matching Decks
+can complete the handshake, and a Deck with a different one shows as "Found …, but the passphrase
+doesn't match".
 
 Discovery doesn't cross routers/VLANs; set the address manually there. On first start Windows may ask
 whether glidekm may use the network - allow it on private networks.
@@ -130,7 +136,7 @@ edit by hand (every key can be passed as `--key value` too; see `glidekm-server.
 | key | default | meaning |
 |---|---|---|
 | `client` | empty = automatic | Deck address, `host[:port]`; empty finds it on the LAN |
-| `passphrase` | - | shared secret, same on both sides |
+| `passphrase` | empty = built-in default | optional shared secret, same on both sides |
 | `side` | `right` | where the Deck sits: `right`, `left`, `top`, `bottom` |
 | `offset` | `0` | shift the Deck screen along that edge (Windows px) |
 | `scale` | `1.0` | Windows px per Deck px (>1 = slower cursor on the Deck) |
@@ -153,7 +159,7 @@ and docked external displays are handled automatically). Client command line: `-
 ## Troubleshooting
 
 - **Nothing happens at the edge**: the tray icon must be green (see the status line in the settings window).
-  Both sides need the same passphrase; a mismatch logs `handshake failed`. UDP 4242 must be reachable on the Deck.
+  If you set a passphrase, it must be the same on both sides (or empty on both). UDP 4242 must be reachable on the Deck.
 - **Cursor lands on the wrong spot on the Deck when docked with two displays (Desktop Mode)**: set the
   screen size manually in glidekm Settings to the combined desktop size.
 - **Laggy on Wi-Fi**: disable Deck Wi-Fi power saving (`sudo iw dev wlan0 set power_save off`) or use ethernet.

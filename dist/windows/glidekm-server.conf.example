@@ -3,8 +3,9 @@
 # Steam Deck address (IP or hostname, optional :port). Leave empty to find
 # the Deck automatically on the local network.
 client =
-# Must match the passphrase on the Deck.
-passphrase = change-me
+# Optional. Leave unset to pair with any glidekm on the network; if set, use
+# the same passphrase on the PC and the Deck.
+# passphrase = my-secret
 
 # Where the Deck "monitor" sits relative to your Windows desktop:
 # right | left | top | bottom

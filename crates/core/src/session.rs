@@ -49,6 +49,20 @@ impl std::fmt::Display for Error {
     }
 }
 
+/// Used when no passphrase is configured, so setup needs no settings at all.
+/// Traffic is still encrypted (fresh keys per session), but any glidekm on
+/// the network can pair; set a passphrase to restrict pairing.
+pub const DEFAULT_PASSPHRASE: &str = "glidekm-default-pairing";
+
+/// The PSK for a configured passphrase, or the built-in default if empty.
+pub fn psk_for(passphrase: &str) -> [u8; 32] {
+    derive_psk(if passphrase.is_empty() {
+        DEFAULT_PASSPHRASE
+    } else {
+        passphrase
+    })
+}
+
 /// Derive the 32-byte PSK from a passphrase (BLAKE2s, domain separated).
 pub fn derive_psk(passphrase: &str) -> [u8; 32] {
     let mut h = DefaultResolver
