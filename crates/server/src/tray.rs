@@ -211,7 +211,10 @@ impl Tray {
     }
 
     /// Show the context menu at the cursor; returns the chosen command id.
-    pub fn menu(&self, can_switch: bool, in_deck: bool) -> usize {
+    /// Takes only the window handle (not `&self`) so the caller can run it with no
+    /// `RefCell` borrow held: `TrackPopupMenu` pumps messages, and a nested
+    /// `WM_TIMER` would otherwise re-borrow the state and panic (= abort).
+    pub fn menu(hwnd: HWND, can_switch: bool, in_deck: bool) -> usize {
         unsafe {
             let m = CreatePopupMenu();
             let open = wide("Open settings");
@@ -234,17 +237,17 @@ impl Tray {
             let mut pt = POINT { x: 0, y: 0 };
             GetCursorPos(&mut pt);
             // Required so the menu closes when clicking elsewhere.
-            SetForegroundWindow(self.hwnd);
+            SetForegroundWindow(hwnd);
             let cmd = TrackPopupMenu(
                 m,
                 TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
                 pt.x,
                 pt.y,
                 0,
-                self.hwnd,
+                hwnd,
                 std::ptr::null(),
             );
-            PostMessageW(self.hwnd, WM_NULL, 0, 0);
+            PostMessageW(hwnd, WM_NULL, 0, 0);
             DestroyMenu(m);
             cmd as usize
         }
@@ -341,8 +344,36 @@ fn tip(ctl: &Control) -> String {
 }
 
 unsafe extern "system" fn tray_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // The context menu runs a nested message loop, so it must not happen while
+    // STATE is borrowed. Handle it first, outside the borrow.
+    if msg == WM_APP_TRAY && matches!((lp & 0xFFFF) as u32, WM_RBUTTONUP | WM_CONTEXTMENU) {
+        let Some((ctl, main)) = STATE.with(|s| {
+            s.try_borrow()
+                .ok()?
+                .as_ref()
+                .map(|st| (st.ctl.clone(), st.main))
+        }) else {
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        };
+        let status = ctl.status();
+        let cmd = Tray::menu(
+            hwnd,
+            matches!(status, Status::Online | Status::Active),
+            status == Status::Active,
+        );
+        match cmd {
+            ID_OPEN => crate::settings::show(ctl.clone()),
+            ID_SWITCH => ctl.platform.lock().unwrap().toggle_switch(),
+            ID_QUIT => {
+                PostMessageW(main, WM_APP_QUIT, 0, 0);
+            }
+            _ => {}
+        }
+        return 0;
+    }
     let handled = STATE.with(|s| {
-        let mut g = s.borrow_mut();
+        // Never panic here (panic = "abort"): skip if re-entered.
+        let mut g = s.try_borrow_mut().ok()?;
         let st = g.as_mut()?;
         match msg {
             WM_TIMER => {
@@ -352,24 +383,8 @@ unsafe extern "system" fn tray_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 Some(0)
             }
             WM_APP_TRAY => {
-                match (lp & 0xFFFF) as u32 {
-                    WM_LBUTTONUP | WM_LBUTTONDBLCLK => crate::settings::show(st.ctl.clone()),
-                    WM_RBUTTONUP | WM_CONTEXTMENU => {
-                        let status = st.ctl.status();
-                        let cmd = st.tray.menu(
-                            matches!(status, Status::Online | Status::Active),
-                            status == Status::Active,
-                        );
-                        match cmd {
-                            ID_OPEN => crate::settings::show(st.ctl.clone()),
-                            ID_SWITCH => st.ctl.platform.lock().unwrap().toggle_switch(),
-                            ID_QUIT => {
-                                PostMessageW(st.main, WM_APP_QUIT, 0, 0);
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
+                if let WM_LBUTTONUP | WM_LBUTTONDBLCLK = (lp & 0xFFFF) as u32 {
+                    crate::settings::show(st.ctl.clone());
                 }
                 Some(0)
             }
