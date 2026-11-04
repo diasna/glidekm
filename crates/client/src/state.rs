@@ -12,6 +12,11 @@ pub struct State<S: Sink> {
     pub capture: bool,
     pub width: u16,
     pub height: u16,
+    /// Move the pointer with relative events only (see `move_abs`). Needed in
+    /// SteamOS Game Mode, where gamescope/Steam ignore absolute pointers.
+    pub rel_pointer: bool,
+    /// Where the relative pointer is believed to be, in pixels.
+    est: Option<(i32, i32)>,
     keys: Vec<u16>,
     buttons: Vec<u16>,
 }
@@ -24,6 +29,8 @@ impl<S: Sink> State<S> {
             capture: false,
             width,
             height,
+            rel_pointer: false,
+            est: None,
             keys: Vec::new(),
             buttons: Vec::new(),
         }
@@ -34,9 +41,14 @@ impl<S: Sink> State<S> {
         ((v.min(size.saturating_sub(1)) as i64 * ABS_MAX as i64 + max / 2) / max) as i32
     }
 
+    /// Buttons and wheel go to the relative device whenever it moves the pointer.
+    fn rel_dev(&self) -> bool {
+        self.capture || self.rel_pointer
+    }
+
     fn release_buttons(&mut self) {
         for b in std::mem::take(&mut self.buttons) {
-            self.sink.button(self.capture, b, false);
+            self.sink.button(self.rel_dev(), b, false);
         }
     }
 
@@ -58,6 +70,7 @@ impl<S: Sink> State<S> {
     pub fn deactivate(&mut self) {
         self.release_all();
         self.active = false;
+        self.est = None;
     }
 
     pub fn handle(&mut self, ev: Event) {
@@ -65,6 +78,7 @@ impl<S: Sink> State<S> {
             Event::Enter { x, y, capture } => {
                 self.release_all();
                 self.active = true;
+                self.est = None;
                 self.capture = capture;
                 if !capture {
                     self.move_abs(x, y);
@@ -79,14 +93,14 @@ impl<S: Sink> State<S> {
                 let held = self.buttons.contains(&code);
                 if down && !held {
                     self.buttons.push(code);
-                    self.sink.button(self.capture, code, true);
+                    self.sink.button(self.rel_dev(), code, true);
                 } else if !down && held {
                     self.buttons.retain(|&b| b != code);
-                    self.sink.button(self.capture, code, false);
+                    self.sink.button(self.rel_dev(), code, false);
                 }
             }
             Event::Wheel { horizontal, v120 } if self.active => {
-                self.sink.wheel(self.capture, horizontal, v120 as i32)
+                self.sink.wheel(self.rel_dev(), horizontal, v120 as i32)
             }
             Event::Key { code, down }
                 if self.active && (code as usize) < KEY_BITS && code > 0 && code <= 248 =>
@@ -133,7 +147,7 @@ impl<S: Sink> State<S> {
                         .collect();
                     for b in stale_b {
                         self.buttons.retain(|&x| x != b);
-                        self.sink.button(self.capture, b, false);
+                        self.sink.button(self.rel_dev(), b, false);
                     }
                 }
             }
@@ -142,6 +156,25 @@ impl<S: Sink> State<S> {
     }
 
     fn move_abs(&mut self, x: u16, y: u16) {
+        if self.rel_pointer {
+            // No absolute pointer here: slam into the top-left corner once
+            // (the cursor clamps), then follow with exact relative deltas.
+            let (w, h) = (self.width as i32, self.height as i32);
+            let (tx, ty) = (
+                (x as i32).min(w.saturating_sub(1)),
+                (y as i32).min(h.saturating_sub(1)),
+            );
+            let (ex, ey) = match self.est {
+                Some(e) => e,
+                None => {
+                    self.sink.move_rel(-2 * w - 200, -2 * h - 200);
+                    (0, 0)
+                }
+            };
+            self.sink.move_rel(tx - ex, ty - ey);
+            self.est = Some((tx, ty));
+            return;
+        }
         let (ax, ay) = (Self::to_abs(x, self.width), Self::to_abs(y, self.height));
         self.sink.move_abs(ax, ay);
     }
@@ -265,5 +298,27 @@ mod tests {
         });
         assert_eq!(s.sink.log.last().unwrap(), "key 31 up");
         assert!(!s.active);
+    }
+
+    #[test]
+    fn relative_pointer_mode_follows_with_deltas() {
+        let mut s = st();
+        s.rel_pointer = true;
+        s.handle(Event::Enter {
+            x: 100,
+            y: 50,
+            capture: false,
+        });
+        s.handle(Event::MoveAbs { x: 110, y: 40 });
+        s.handle(Event::Button {
+            code: 0x110,
+            down: true,
+        });
+        let l = &s.sink.log;
+        assert!(l.iter().all(|e| !e.starts_with("abs")), "{l:?}");
+        assert_eq!(l[0], "rel -2760 -1800");
+        assert_eq!(l[1], "rel 100 50");
+        assert_eq!(l[2], "rel 10 -10");
+        assert!(l[3].contains("(rel)"), "{l:?}");
     }
 }

@@ -288,6 +288,22 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
                                     } else {
                                         debug!("rx {ev:?}");
                                     }
+                                    if matches!(ev, Event::Enter { .. }) {
+                                        // Re-checked on every entry: the user can switch
+                                        // between Game Mode and Desktop Mode at any time.
+                                        let rel = game_mode();
+                                        if rel != d.st.rel_pointer {
+                                            info!(
+                                                "pointer: {}",
+                                                if rel {
+                                                    "relative (Game Mode)"
+                                                } else {
+                                                    "absolute"
+                                                }
+                                            );
+                                        }
+                                        d.st.rel_pointer = rel;
+                                    }
                                     d.st.handle(ev);
                                 }
                                 d.st.sink.flush();
@@ -396,6 +412,21 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
             }
         }
     }
+}
+
+/// True while SteamOS Game Mode (gamescope) is running. gamescope/Steam ignore
+/// absolute pointer devices there, so the pointer is driven with relative events.
+fn game_mode() -> bool {
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    dir.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+            && std::fs::read_to_string(e.path().join("comm"))
+                .is_ok_and(|c| c.starts_with("gamescope"))
+    })
 }
 
 pub fn hostname() -> String {
