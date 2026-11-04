@@ -502,6 +502,8 @@ pub fn run(control: Arc<Control>, opts: Opts) -> Result<(), String> {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |p| {
         restore_cursor();
+        // panic = "abort" and no console: without this the cause is lost.
+        warn!("PANIC: {p}");
         prev(p)
     }));
 
