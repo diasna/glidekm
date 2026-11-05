@@ -4,6 +4,7 @@
 //! Settings come from the config file (edited by glidekm Settings, watched
 //! and applied live); state is published to the runtime status file.
 
+mod clipboard;
 mod screen;
 mod settings;
 mod sink;
@@ -45,6 +46,7 @@ struct Daemon {
     json_status: Option<PathBuf>,
     updater: updater::Updater,
     screens: screen::Detector,
+    clip: clipboard::Clip,
 }
 
 fn run() -> Result<(), String> {
@@ -113,6 +115,7 @@ fn run() -> Result<(), String> {
         json_status: flags.get("status_file").map(PathBuf::from),
         updater: updater::Updater::spawn(auto_update),
         screens: screen::Detector::new(),
+        clip: clipboard::Clip::spawn(),
     };
 
     // Each iteration (re)applies the configuration; `serve` returns when the
@@ -226,6 +229,8 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
     let mut last_published = Status::default();
     let mut last_watch = Instant::now();
     let mut rejected = String::new();
+    let mut clip_asm = glidekm_core::clip::Assembler::default();
+    let mut clip_id = (session::now_millis() as u32) | 1;
     let autodetect = d.cfg.fixed_size().is_none();
     let mut last_announce: Option<Instant> = None;
     let _ = sock.set_broadcast(true);
@@ -304,6 +309,18 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
                                         }
                                         d.st.rel_pointer = rel;
                                     }
+                                    if let Event::Clip {
+                                        id,
+                                        idx,
+                                        count,
+                                        data,
+                                    } = &ev
+                                    {
+                                        if let Some(t) = clip_asm.push(*id, *idx, *count, data) {
+                                            let _ = d.clip.set.send(t);
+                                        }
+                                        continue;
+                                    }
                                     d.st.handle(ev);
                                 }
                                 d.st.sink.flush();
@@ -326,6 +343,23 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) => {}
             Err(e) => warn!("recv: {e}"),
+        }
+
+        // Clipboard changes made here go to the PC.
+        d.clip
+            .connected
+            .store(peer.is_some(), std::sync::atomic::Ordering::Relaxed);
+        while let Ok(text) = d.clip.changed.try_recv() {
+            let Some(p) = peer.as_mut() else { continue };
+            if let Some(chunks) = glidekm_core::clip::split(clip_id, &text) {
+                clip_id = clip_id.wrapping_add(1);
+                for c in chunks {
+                    if let Ok(pkt) = p.tr.seal(&encode_all(&[c])) {
+                        let _ = sock.send_to(&pkt, p.addr);
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
         }
 
         // Watchdog: never leave keys held if the server vanishes.

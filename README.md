@@ -9,7 +9,7 @@ Desktop Mode.
 - Tiny: ~0.5 MB Windows exe, ~0.6 MB static Linux binary. No runtime deps, no async runtime.
 - **Zero configuration:** start it on both machines and they find each other on the local network.
 - Encrypted (Noise `NNpsk0`, ChaCha20-Poly1305); an optional passphrase restricts who can pair.
-- One job only: mouse + keyboard. No clipboard, no file transfer.
+- Mouse + keyboard, plus a **shared text clipboard** (copy on one machine, paste on the other, both ways, up to 256 KB). On the Deck this uses `wl-copy`/`wl-paste` (wl-clipboard) or `xclip`/`xsel`, whichever is installed (`sudo pacman -S wl-clipboard` in Desktop Mode, after `sudo steamos-readonly disable`). No file transfer.
 
 ## How it works
 

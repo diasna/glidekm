@@ -34,6 +34,10 @@ pub struct Shared {
     pub peer_name: Mutex<String>,
     /// No address configured: find the Deck on the LAN.
     pub auto: AtomicBool,
+    /// Clipboard chunks arriving from the Deck, and a finished text waiting
+    /// to be put on the clipboard.
+    clip_asm: Mutex<glidekm_core::clip::Assembler>,
+    pub clip_text: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -50,6 +54,8 @@ impl Shared {
             last_error: Mutex::new(String::new()),
             peer_name: Mutex::new(String::new()),
             auto: AtomicBool::new(false),
+            clip_asm: Mutex::new(Default::default()),
+            clip_text: Mutex::new(None),
         })
     }
 
@@ -143,6 +149,7 @@ pub fn spawn(shared: Arc<Shared>) -> std::io::Result<Sender<Event>> {
         Err(e) => debug!("not listening for Deck announcements: {e}"),
     }
 
+    let sh2 = shared.clone();
     let c = conn.clone();
     let sh = shared.clone();
     std::thread::Builder::new()
@@ -151,6 +158,7 @@ pub fn spawn(shared: Arc<Shared>) -> std::io::Result<Sender<Event>> {
     std::thread::Builder::new()
         .name("net-tx".into())
         .spawn(move || send_loop(sock, rx, conn, shared))?;
+    crate::clipboard::spawn(sh2, tx.clone());
     Ok(tx)
 }
 
@@ -328,14 +336,23 @@ fn send_loop(sock: UdpSocket, rx: Receiver<Event>, conn: Arc<Mutex<Conn>>, share
         if batch.is_empty() {
             continue;
         }
-        let plain = encode_all(&batch);
-        match tr.seal(&plain) {
-            Ok(pkt) => {
-                if let Err(e) = sock.send_to(&pkt, addr) {
-                    debug!("send: {e}");
+        // Clipboard chunks travel alone so a datagram stays under the MTU.
+        let (clips, rest): (Vec<Event>, Vec<Event>) = batch
+            .drain(..)
+            .partition(|e| matches!(e, Event::Clip { .. }));
+        let groups = (!rest.is_empty())
+            .then_some(rest)
+            .into_iter()
+            .chain(clips.into_iter().map(|c| vec![c]));
+        for g in groups {
+            match tr.seal(&encode_all(&g)) {
+                Ok(pkt) => {
+                    if let Err(e) = sock.send_to(&pkt, addr) {
+                        debug!("send: {e}");
+                    }
                 }
+                Err(e) => warn!("seal: {e}"),
             }
-            Err(e) => warn!("seal: {e}"),
         }
     }
 }
@@ -406,6 +423,18 @@ fn recv_loop(sock: UdpSocket, conn: Arc<Mutex<Conn>>, shared: Arc<Shared>) {
                 let Some(tr) = c.tr.clone() else { continue };
                 let Ok(plain) = tr.open(pkt) else { continue };
                 for ev in Event::decode_all(&plain) {
+                    if let Event::Clip {
+                        id,
+                        idx,
+                        count,
+                        data,
+                    } = &ev
+                    {
+                        let done = shared.clip_asm.lock().unwrap().push(*id, *idx, *count, data);
+                        if done.is_some() {
+                            *shared.clip_text.lock().unwrap() = done;
+                        }
+                    }
                     if let Event::Hello { width, height } = ev {
                         let v = (width as u32) << 16 | height as u32;
                         if shared.client_size.swap(v, Ordering::Relaxed) != v {

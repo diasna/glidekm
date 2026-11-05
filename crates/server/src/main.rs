@@ -2,6 +2,7 @@
 //! client that behaves like an extra monitor.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod clipboard;
 mod control;
 mod engine;
 mod hotkey;

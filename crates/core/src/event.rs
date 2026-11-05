@@ -69,6 +69,13 @@ pub enum Event {
         width: u16,
         height: u16,
     },
+    /// Either direction: one chunk of a shared text clipboard.
+    Clip {
+        id: u32,
+        idx: u16,
+        count: u16,
+        data: Vec<u8>,
+    },
 }
 
 mod tag {
@@ -82,6 +89,7 @@ mod tag {
     pub const SET_MODE: u8 = 8;
     pub const HEARTBEAT: u8 = 9;
     pub const HELLO: u8 = 10;
+    pub const CLIP: u8 = 11;
 }
 
 impl Event {
@@ -137,6 +145,19 @@ impl Event {
                 out.push(tag::HELLO);
                 out.extend_from_slice(&width.to_le_bytes());
                 out.extend_from_slice(&height.to_le_bytes());
+            }
+            Event::Clip {
+                id,
+                idx,
+                count,
+                data,
+            } => {
+                out.push(tag::CLIP);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.extend_from_slice(&idx.to_le_bytes());
+                out.extend_from_slice(&count.to_le_bytes());
+                out.extend_from_slice(&(data.len() as u16).to_le_bytes());
+                out.extend_from_slice(data);
             }
         }
     }
@@ -228,6 +249,20 @@ impl Event {
                 },
                 5,
             ),
+            tag::CLIP => {
+                let len = u16_at(9)? as usize;
+                let data = b.get(11..11 + len)?.to_vec();
+                let id = u32::from_le_bytes([*b.get(1)?, *b.get(2)?, *b.get(3)?, *b.get(4)?]);
+                (
+                    Event::Clip {
+                        id,
+                        idx: u16_at(5)?,
+                        count: u16_at(7)?,
+                        data,
+                    },
+                    11 + len,
+                )
+            }
             _ => return None,
         })
     }
@@ -283,6 +318,12 @@ mod tests {
             Event::Hello {
                 width: 1280,
                 height: 800,
+            },
+            Event::Clip {
+                id: 0xdead_beef,
+                idx: 1,
+                count: 3,
+                data: b"abc".to_vec(),
             },
         ];
         let bytes = encode_all(&evs);
