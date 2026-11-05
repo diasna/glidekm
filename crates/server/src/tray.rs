@@ -380,6 +380,9 @@ unsafe extern "system" fn tray_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 let status = st.ctl.status();
                 let t = tip(&st.ctl);
                 st.tray.update(status, &t);
+                if let Some((title, text)) = st.ctl.shared.take_notice() {
+                    st.tray.balloon(&title, &text);
+                }
                 Some(0)
             }
             WM_APP_TRAY => {

@@ -47,6 +47,8 @@ struct Daemon {
     updater: updater::Updater,
     screens: screen::Detector,
     clip: clipboard::Clip,
+    /// Last outgoing clipboard transfer, kept for repair requests.
+    clip_out: Option<glidekm_core::clip::Outbox>,
 }
 
 fn run() -> Result<(), String> {
@@ -116,6 +118,7 @@ fn run() -> Result<(), String> {
         updater: updater::Updater::spawn(auto_update),
         screens: screen::Detector::new(),
         clip: clipboard::Clip::spawn(),
+        clip_out: None,
     };
 
     // Each iteration (re)applies the configuration; `serve` returns when the
@@ -309,6 +312,12 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
                                         }
                                         d.st.rel_pointer = rel;
                                     }
+                                    if let Event::ClipNack { id, missing } = &ev {
+                                        if let Some(ob) = d.clip_out.as_ref() {
+                                            send_paced(sock, p, ob.resend(*id, missing));
+                                        }
+                                        continue;
+                                    }
                                     if let Event::Clip {
                                         id,
                                         kind,
@@ -357,19 +366,18 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
             let Some(chunks) = glidekm_core::clip::split(clip_id, &content) else {
                 continue;
             };
+            d.clip_out = Some(glidekm_core::clip::Outbox::new(clip_id, chunks.clone()));
             clip_id = clip_id.wrapping_add(1);
-            // Paced in its own thread: a big image takes seconds and must not
-            // stall input handling or the keep-alive.
-            if let Ok(sock) = sock.try_clone() {
-                let (tr, addr) = (p.tr.clone(), p.addr);
-                std::thread::spawn(move || {
-                    for c in chunks {
-                        if let Ok(pkt) = tr.seal(&encode_all(&[c])) {
-                            let _ = sock.send_to(&pkt, addr);
-                        }
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                });
+            send_paced(sock, p, chunks);
+        }
+
+        // Ask the PC again for chunks of an incoming transfer that stalled.
+        if let (Some(p), Some((id, missing))) =
+            (peer.as_ref(), clip_asm.stalled(Duration::from_millis(300)))
+        {
+            debug!("clipboard: asking for {} missing chunks", missing.len());
+            if let Ok(pkt) = p.tr.seal(&encode_all(&[Event::ClipNack { id, missing }])) {
+                let _ = sock.send_to(&pkt, p.addr);
             }
         }
 
@@ -479,6 +487,23 @@ pub fn hostname() -> String {
         .or_else(|_| std::fs::read_to_string("/etc/hostname"))
         .map(|s| s.trim().chars().take(64).collect())
         .unwrap_or_default()
+}
+
+/// Send clipboard chunks to the PC from a background thread, paced so a big
+/// transfer neither floods the link nor stalls input handling.
+fn send_paced(sock: &UdpSocket, p: &Peer, chunks: Vec<Event>) {
+    let Ok(sock) = sock.try_clone() else { return };
+    let (tr, addr) = (p.tr.clone(), p.addr);
+    std::thread::spawn(move || {
+        for (i, c) in chunks.into_iter().enumerate() {
+            if let Ok(pkt) = tr.seal(&encode_all(&[c])) {
+                let _ = sock.send_to(&pkt, addr);
+            }
+            if i % 4 == 3 {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    });
 }
 
 fn send_hello<S: Sink>(sock: &UdpSocket, p: &mut Peer, st: &State<S>) {

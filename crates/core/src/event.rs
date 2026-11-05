@@ -78,6 +78,11 @@ pub enum Event {
         count: u16,
         data: Vec<u8>,
     },
+    /// Either direction: "I'm missing these chunks of transfer `id`".
+    ClipNack {
+        id: u32,
+        missing: Vec<u16>,
+    },
 }
 
 mod tag {
@@ -92,6 +97,7 @@ mod tag {
     pub const HEARTBEAT: u8 = 9;
     pub const HELLO: u8 = 10;
     pub const CLIP: u8 = 11;
+    pub const CLIP_NACK: u8 = 12;
 }
 
 impl Event {
@@ -162,6 +168,14 @@ impl Event {
                 out.extend_from_slice(&count.to_le_bytes());
                 out.extend_from_slice(&(data.len() as u16).to_le_bytes());
                 out.extend_from_slice(data);
+            }
+            Event::ClipNack { id, missing } => {
+                out.push(tag::CLIP_NACK);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.extend_from_slice(&(missing.len() as u16).to_le_bytes());
+                for m in missing {
+                    out.extend_from_slice(&m.to_le_bytes());
+                }
             }
         }
     }
@@ -268,6 +282,14 @@ impl Event {
                     12 + len,
                 )
             }
+            tag::CLIP_NACK => {
+                let n = u16_at(5)? as usize;
+                let id = u32::from_le_bytes([*b.get(1)?, *b.get(2)?, *b.get(3)?, *b.get(4)?]);
+                let missing = (0..n)
+                    .map(|i| u16_at(7 + 2 * i))
+                    .collect::<Option<Vec<_>>>()?;
+                (Event::ClipNack { id, missing }, 7 + 2 * n)
+            }
             _ => return None,
         })
     }
@@ -330,6 +352,10 @@ mod tests {
                 idx: 1,
                 count: 3,
                 data: b"abc".to_vec(),
+            },
+            Event::ClipNack {
+                id: 9,
+                missing: vec![1, 500, 65535],
             },
         ];
         let bytes = encode_all(&evs);

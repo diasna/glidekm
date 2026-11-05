@@ -36,7 +36,11 @@ pub struct Shared {
     pub auto: AtomicBool,
     /// Clipboard chunks arriving from the Deck, and a finished text waiting
     /// to be put on the clipboard.
-    clip_asm: Mutex<glidekm_core::clip::Assembler>,
+    pub clip_asm: Mutex<glidekm_core::clip::Assembler>,
+    /// Last outgoing clipboard transfer, kept for repair requests.
+    pub clip_out: Mutex<Option<glidekm_core::clip::Outbox>>,
+    /// A message for the tray to show (title, text).
+    notice: Mutex<Option<(String, String)>>,
     pub clip_in: Mutex<Option<glidekm_core::clip::Content>>,
     /// Clipboard transfer in progress, for the UI.
     xfer: Mutex<Option<Xfer>>,
@@ -57,6 +61,8 @@ impl Shared {
             peer_name: Mutex::new(String::new()),
             auto: AtomicBool::new(false),
             clip_asm: Mutex::new(Default::default()),
+            clip_out: Mutex::new(None),
+            notice: Mutex::new(None),
             clip_in: Mutex::new(None),
             xfer: Mutex::new(None),
         })
@@ -80,6 +86,14 @@ impl Shared {
 
     fn set_error(&self, e: &str) {
         *self.last_error.lock().unwrap() = e.to_string();
+    }
+
+    pub fn set_notice(&self, title: &str, text: &str) {
+        *self.notice.lock().unwrap() = Some((title.into(), text.into()));
+    }
+
+    pub fn take_notice(&self) -> Option<(String, String)> {
+        self.notice.lock().unwrap().take()
     }
 
     /// Report clipboard transfer progress (`kind` 0 text, 1 image).
@@ -186,11 +200,12 @@ pub fn spawn(shared: Arc<Shared>) -> std::io::Result<Sender<Event>> {
     }
 
     let sh2 = shared.clone();
+    let rtx = tx.clone();
     let c = conn.clone();
     let sh = shared.clone();
     std::thread::Builder::new()
         .name("net-rx".into())
-        .spawn(move || recv_loop(rsock, c, sh))?;
+        .spawn(move || recv_loop(rsock, c, sh, rtx))?;
     std::thread::Builder::new()
         .name("net-tx".into())
         .spawn(move || send_loop(sock, rx, conn, shared))?;
@@ -393,7 +408,7 @@ fn send_loop(sock: UdpSocket, rx: Receiver<Event>, conn: Arc<Mutex<Conn>>, share
     }
 }
 
-fn recv_loop(sock: UdpSocket, conn: Arc<Mutex<Conn>>, shared: Arc<Shared>) {
+fn recv_loop(sock: UdpSocket, conn: Arc<Mutex<Conn>>, shared: Arc<Shared>, tx: Sender<Event>) {
     let mut buf = vec![0u8; 2048];
     loop {
         let (n, from) = match sock.recv_from(&mut buf) {
@@ -479,6 +494,13 @@ fn recv_loop(sock: UdpSocket, conn: Arc<Mutex<Conn>>, shared: Arc<Shared>) {
                         }
                         if done.is_some() {
                             *shared.clip_in.lock().unwrap() = done;
+                        }
+                    }
+                    if let Event::ClipNack { id, missing } = &ev {
+                        if let Some(ob) = shared.clip_out.lock().unwrap().as_ref() {
+                            for e in ob.resend(*id, missing) {
+                                let _ = tx.send(e);
+                            }
                         }
                     }
                     if let Event::Hello { width, height } = ev {

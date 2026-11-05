@@ -5,8 +5,9 @@
 //! the PC.
 
 use glidekm_core::clip::{self, Content, Watcher};
-use glidekm_core::{debug, info};
+use glidekm_core::{debug, info, warn};
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -50,6 +51,7 @@ fn run(set_rx: Receiver<Content>, out: Sender<Content>, connected: Arc<AtomicBoo
     let mut w = Watcher::default();
     let mut tool: Option<Tool> = None;
     let mut warned = false;
+    let mut cache = ReadCache::default();
     loop {
         match set_rx.recv_timeout(Duration::from_millis(400)) {
             Ok(c) => {
@@ -57,7 +59,7 @@ fn run(set_rx: Receiver<Content>, out: Sender<Content>, connected: Arc<AtomicBoo
                 if let Some(tl) = tool.or_else(detect) {
                     if write(tl, &c) {
                         tool = Some(tl);
-                        debug!("clipboard: received {} bytes", c.bytes().len());
+                        debug!("clipboard: received {} bytes", c.size());
                     }
                 }
             }
@@ -76,9 +78,9 @@ fn run(set_rx: Receiver<Content>, out: Sender<Content>, connected: Arc<AtomicBoo
                     }
                 }
                 let Some(tl) = tool else { continue };
-                if let Some(cur) = read(tl) {
+                if let Some(cur) = read(tl, &mut cache) {
                     if w.changed(&cur, connected.load(Ordering::Relaxed)) {
-                        debug!("clipboard: sending {} bytes", cur.bytes().len());
+                        debug!("clipboard: sending {} bytes", cur.size());
                         if out.send(cur).is_err() {
                             return;
                         }
@@ -165,12 +167,51 @@ fn types(t: Tool) -> String {
         .unwrap_or_default()
 }
 
-fn read(t: Tool) -> Option<Content> {
+/// What the file list looked like at the last look, so unchanged copied
+/// files are not read (and sent) again on every poll.
+#[derive(Default)]
+struct ReadCache {
+    uris: String,
+}
+
+fn read(t: Tool, cache: &mut ReadCache) -> Option<Content> {
     let ty = types(t);
+    let has = |m: &str| ty.lines().any(|l| l == m);
+    if has("text/uri-list") && t != Tool::Xsel {
+        let args: &[&str] = match t {
+            Tool::WlClipboard => &["wl-paste", "--type", "text/uri-list"],
+            _ => &[
+                "xclip",
+                "-selection",
+                "clipboard",
+                "-t",
+                "text/uri-list",
+                "-o",
+            ],
+        };
+        let b = run_cmd(args, None, 256 * 1024)?;
+        let uris = String::from_utf8(b).ok()?;
+        if uris == cache.uris {
+            return None;
+        }
+        cache.uris = uris.clone();
+        let paths = parse_uri_list(&uris);
+        if paths.is_empty() {
+            return None;
+        }
+        return match clip::load_files(&paths) {
+            Some(f) => Some(Content::Files(f)),
+            None => {
+                warn!("clipboard: files not shared (folders, or over 32 MB in total)");
+                None
+            }
+        };
+    }
+    cache.uris.clear();
     let has_text = ty
         .lines()
         .any(|l| l.starts_with("text/plain") || l == "UTF8_STRING" || l == "STRING" || l == "TEXT");
-    let has_png = ty.lines().any(|l| l == "image/png");
+    let has_png = has("image/png");
     // Text first (copying cells or rich text offers an image too).
     if has_text || t == Tool::Xsel || !has_png {
         let args: &[&str] = match t {
@@ -187,21 +228,108 @@ fn read(t: Tool) -> Option<Content> {
         _ => &["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
     };
     let b = run_cmd(args, None, clip::MAX_IMAGE)?;
-    (b.starts_with(b"\x89PNG")).then_some(Content::Png(b))
+    (b.len() > 4 && b[0] == 0x89 && &b[1..4] == b"PNG").then_some(Content::Png(b))
+}
+
+fn parse_uri_list(s: &str) -> Vec<PathBuf> {
+    s.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let rest = l.strip_prefix("file://")?;
+            let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+            let bytes = rest.as_bytes();
+            let mut out = Vec::with_capacity(bytes.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'%' && i + 2 < bytes.len() {
+                    if let Ok(v) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
+                        out.push(v);
+                        i += 3;
+                        continue;
+                    }
+                }
+                out.push(bytes[i]);
+                i += 1;
+            }
+            Some(PathBuf::from(String::from_utf8(out).ok()?))
+        })
+        .collect()
+}
+
+fn uri_encode(p: &Path) -> String {
+    let mut s = String::from("file://");
+    for b in p.to_string_lossy().bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~/".contains(&b) {
+            s.push(b as char);
+        } else {
+            s.push_str(&format!("%{b:02X}"));
+        }
+    }
+    s
+}
+
+/// Where received files go (emptied before each new transfer).
+fn inbox() -> PathBuf {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    base.join("glidekm").join("clip")
 }
 
 fn write(t: Tool, c: &Content) -> bool {
-    let args: &[&str] = match (t, c) {
-        (Tool::WlClipboard, Content::Text(_)) => &["wl-copy", "--type", "text/plain;charset=utf-8"],
-        (Tool::WlClipboard, Content::Png(_)) => &["wl-copy", "--type", "image/png"],
-        (Tool::Xclip, Content::Text(_)) => &["xclip", "-selection", "clipboard", "-i"],
-        (Tool::Xclip, Content::Png(_)) => {
-            &["xclip", "-selection", "clipboard", "-t", "image/png", "-i"]
+    let (args, data): (&[&str], Vec<u8>) = match (t, c) {
+        (Tool::WlClipboard, Content::Text(s)) => (
+            &["wl-copy", "--type", "text/plain;charset=utf-8"],
+            s.clone().into_bytes(),
+        ),
+        (Tool::WlClipboard, Content::Png(b)) => (&["wl-copy", "--type", "image/png"], b.clone()),
+        (Tool::Xclip, Content::Text(s)) => (
+            &["xclip", "-selection", "clipboard", "-i"],
+            s.clone().into_bytes(),
+        ),
+        (Tool::Xclip, Content::Png(b)) => (
+            &["xclip", "-selection", "clipboard", "-t", "image/png", "-i"],
+            b.clone(),
+        ),
+        (Tool::Xsel, Content::Text(s)) => {
+            (&["xsel", "--clipboard", "--input"], s.clone().into_bytes())
         }
-        (Tool::Xsel, Content::Text(_)) => &["xsel", "--clipboard", "--input"],
-        (Tool::Xsel, Content::Png(_)) => return false, // xsel can't do images
+        (Tool::Xsel, _) => return false, // xsel can't do images or files
+        (_, Content::Files(f)) => {
+            let dir = inbox();
+            let _ = std::fs::remove_dir_all(&dir);
+            let paths = match clip::save_files(&dir, f) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("clipboard: cannot save received files: {e}");
+                    return false;
+                }
+            };
+            let list: String = paths
+                .iter()
+                .map(|p| {
+                    uri_encode(p)
+                        + "
+"
+                })
+                .collect();
+            let args: &[&str] = if t == Tool::WlClipboard {
+                &["wl-copy", "--type", "text/uri-list"]
+            } else {
+                &[
+                    "xclip",
+                    "-selection",
+                    "clipboard",
+                    "-t",
+                    "text/uri-list",
+                    "-i",
+                ]
+            };
+            (args, list.into_bytes())
+        }
     };
-    run_cmd(args, Some(c.bytes()), 0).is_some()
+    run_cmd(args, Some(&data), 0).is_some()
 }
 
 /// Run a clipboard tool, feeding `input` and returning up to `max` bytes of
