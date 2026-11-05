@@ -38,6 +38,8 @@ pub struct Shared {
     /// to be put on the clipboard.
     clip_asm: Mutex<glidekm_core::clip::Assembler>,
     pub clip_in: Mutex<Option<glidekm_core::clip::Content>>,
+    /// Clipboard transfer in progress, for the UI.
+    xfer: Mutex<Option<Xfer>>,
 }
 
 impl Shared {
@@ -56,6 +58,7 @@ impl Shared {
             auto: AtomicBool::new(false),
             clip_asm: Mutex::new(Default::default()),
             clip_in: Mutex::new(None),
+            xfer: Mutex::new(None),
         })
     }
 
@@ -79,10 +82,43 @@ impl Shared {
         *self.last_error.lock().unwrap() = e.to_string();
     }
 
+    /// Report clipboard transfer progress (`kind` 0 text, 1 image).
+    pub fn set_xfer(&self, sending: bool, kind: u8, done: usize, total: usize) {
+        *self.xfer.lock().unwrap() = Some(Xfer {
+            sending,
+            kind,
+            done,
+            total,
+            at: Instant::now(),
+        });
+    }
+
+    /// Current clipboard transfer as (label, percent), if one is running or
+    /// just finished. Small transfers are too quick to be worth showing.
+    pub fn xfer_progress(&self) -> Option<(String, u32)> {
+        let g = self.xfer.lock().unwrap();
+        let x = g.as_ref()?;
+        if x.total < 8 || x.at.elapsed() > Duration::from_secs(2) {
+            return None;
+        }
+        let pct = (x.done * 100 / x.total).min(100) as u32;
+        let what = if x.kind == 1 { "image" } else { "text" };
+        let verb = if x.sending { "Sending" } else { "Receiving" };
+        Some((format!("{verb} {what} {pct}%"), pct))
+    }
+
     pub fn size(&self) -> Option<(u16, u16)> {
         let v = self.client_size.load(Ordering::Relaxed);
         (v != 0).then_some(((v >> 16) as u16, v as u16))
     }
+}
+
+struct Xfer {
+    sending: bool,
+    kind: u8,
+    done: usize,
+    total: usize,
+    at: Instant,
 }
 
 pub fn is_auto(target: &str) -> bool {
@@ -431,11 +467,16 @@ fn recv_loop(sock: UdpSocket, conn: Arc<Mutex<Conn>>, shared: Arc<Shared>) {
                         data,
                     } = &ev
                     {
-                        let done = shared
-                            .clip_asm
-                            .lock()
-                            .unwrap()
-                            .push(*id, *kind, *idx, *count, data);
+                        let (done, (got, total)) = {
+                            let mut a = shared.clip_asm.lock().unwrap();
+                            let d = a.push(*id, *kind, *idx, *count, data);
+                            (d, a.progress())
+                        };
+                        if done.is_some() {
+                            shared.set_xfer(false, *kind, *count as usize, *count as usize);
+                        } else {
+                            shared.set_xfer(false, *kind, got, total);
+                        }
                         if done.is_some() {
                             *shared.clip_in.lock().unwrap() = done;
                         }

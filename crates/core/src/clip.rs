@@ -100,6 +100,14 @@ pub struct Assembler {
 }
 
 impl Assembler {
+    /// (chunks received, chunks expected) of the transfer in progress.
+    pub fn progress(&self) -> (usize, usize) {
+        (
+            self.parts.iter().filter(|p| p.is_some()).count(),
+            self.parts.len(),
+        )
+    }
+
     pub fn push(
         &mut self,
         id: u32,

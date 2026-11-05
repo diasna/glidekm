@@ -84,6 +84,80 @@ const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
 }
 
 /// Open (or bring back) the settings window.
+/// Taskbar button progress bar (ITaskbarList3) for clipboard transfers. Only
+/// visible while the settings window is open; the tray tooltip covers the rest.
+fn taskbar_progress(hwnd: HWND, pct: Option<u32>) {
+    use std::ffi::c_void;
+    use windows_sys::core::GUID;
+    use windows_sys::Win32::System::Com::*;
+
+    type Hr = i32;
+    #[repr(C)]
+    struct Vtbl {
+        _qi: usize,
+        _add_ref: usize,
+        _release: usize,
+        hr_init: unsafe extern "system" fn(*mut c_void) -> Hr,
+        _pad: [usize; 6], // AddTab .. MarkFullscreenWindow
+        set_value: unsafe extern "system" fn(*mut c_void, HWND, u64, u64) -> Hr,
+        set_state: unsafe extern "system" fn(*mut c_void, HWND, i32) -> Hr,
+    }
+    thread_local! {
+        static TB: std::cell::Cell<(usize, Option<u32>)> = const { std::cell::Cell::new((0, None)) };
+    }
+    const CLSID_TASKBAR_LIST: GUID = GUID {
+        data1: 0x56FD_F344,
+        data2: 0xFD6D,
+        data3: 0x11d0,
+        data4: [0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90],
+    };
+    const IID_TASKBAR_LIST3: GUID = GUID {
+        data1: 0xEA1A_FB91,
+        data2: 0x9E28,
+        data3: 0x4B86,
+        data4: [0x90, 0xE9, 0x9E, 0x9F, 0x8A, 0x5E, 0xEF, 0xAF],
+    };
+
+    let (mut obj, last) = TB.get();
+    if last == pct && obj != 0 {
+        return;
+    }
+    unsafe {
+        if obj == 0 {
+            if pct.is_none() {
+                return;
+            }
+            CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+            let mut p: *mut c_void = std::ptr::null_mut();
+            let hr = CoCreateInstance(
+                &CLSID_TASKBAR_LIST,
+                std::ptr::null_mut(),
+                CLSCTX_INPROC_SERVER,
+                &IID_TASKBAR_LIST3,
+                &mut p,
+            );
+            if hr < 0 || p.is_null() {
+                return;
+            }
+            let vt = *(p as *const *const Vtbl);
+            ((*vt).hr_init)(p);
+            obj = p as usize;
+        }
+        let p = obj as *mut c_void;
+        let vt = *(p as *const *const Vtbl);
+        match pct {
+            Some(v) => {
+                ((*vt).set_state)(p, hwnd, 2); // TBPF_NORMAL
+                ((*vt).set_value)(p, hwnd, v as u64, 100);
+            }
+            None => {
+                ((*vt).set_state)(p, hwnd, 0); // TBPF_NOPROGRESS
+            }
+        }
+    }
+    TB.set((obj, pct));
+}
+
 pub fn show(ctl: Arc<Control>) {
     let h = WINDOW.load(Ordering::SeqCst);
     if h != 0 {
@@ -552,6 +626,7 @@ impl Ui {
     /// Periodic refresh: status header, switch button, hotkey polling.
     fn tick(&mut self) {
         self.refresh_update();
+        taskbar_progress(self.hwnd, self.ctl.shared.xfer_progress().map(|x| x.1));
         let st = self.ctl.status();
         let text = self.ctl.status_text();
         let capture = self.ctl.shared.capture.load(Ordering::Relaxed);

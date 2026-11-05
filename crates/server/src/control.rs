@@ -227,7 +227,16 @@ impl Control {
         }
     }
 
+    /// Status line, with clipboard transfer progress when one is running.
     pub fn status_text(&self) -> String {
+        let base = self.status_text_base();
+        match self.shared.xfer_progress() {
+            Some((t, _)) => format!("{base} - {t}"),
+            None => base,
+        }
+    }
+
+    fn status_text_base(&self) -> String {
         let peer = self.shared.peer.lock().unwrap().map(|a| a.to_string());
         match self.status() {
             Status::Unconfigured => "Starting…".into(),

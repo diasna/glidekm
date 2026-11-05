@@ -200,10 +200,13 @@ fn run(shared: Arc<Shared>, tx: Sender<Event>) {
                 if let Some(chunks) = clip::split(id, &cur) {
                     id = id.wrapping_add(1);
                     debug!("clipboard: sending {} bytes", cur.bytes().len());
-                    for c in chunks {
+                    let total = chunks.len();
+                    let kind = matches!(cur, Content::Png(_)) as u8;
+                    for (i, c) in chunks.into_iter().enumerate() {
                         if tx.send(c).is_err() {
                             return;
                         }
+                        shared.set_xfer(true, kind, i + 1, total);
                         std::thread::sleep(Duration::from_millis(1));
                     }
                 }
