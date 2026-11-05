@@ -210,6 +210,7 @@ mod sys {
 mod sys {
     use super::Content;
     use std::path::PathBuf;
+    #[allow(dead_code)]
     pub enum Read {
         Files(Vec<PathBuf>),
         Content(Content),
