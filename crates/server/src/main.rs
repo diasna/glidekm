@@ -8,6 +8,7 @@ mod engine;
 mod hotkey;
 mod layout;
 mod net;
+mod png;
 #[cfg(windows)]
 mod scan;
 #[cfg(windows)]

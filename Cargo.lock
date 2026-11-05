@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "glidekm-client"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "glidekm-core",
  "libc",
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "glidekm-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "ed25519-dalek",
  "sha2",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "glidekm-release"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "ed25519-dalek",
  "glidekm-core",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "glidekm-server"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "embed-resource",
  "glidekm-core",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "glidekm-settings"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "eframe",
  "glidekm-core",

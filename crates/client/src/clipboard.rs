@@ -1,9 +1,10 @@
-//! Text clipboard sharing on the Deck. There is no clipboard library here:
-//! the system's own tools are used (`wl-clipboard` on Wayland, `xclip` or
-//! `xsel` on X11/Xwayland), found at run time. A background thread polls the
-//! clipboard, reports changes, and applies text received from the PC.
+//! Clipboard sharing (text and PNG images) on the Deck. There is no clipboard
+//! library here: the system's own tools are used (`wl-clipboard` on Wayland,
+//! `xclip` or `xsel` on X11/Xwayland), found at run time. A background thread
+//! polls the clipboard, reports changes, and applies content received from
+//! the PC.
 
-use glidekm_core::clip::{self, Watcher};
+use glidekm_core::clip::{self, Content, Watcher};
 use glidekm_core::{debug, info};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -13,10 +14,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub struct Clip {
-    /// Text received from the PC, to put on the clipboard.
-    pub set: Sender<String>,
+    /// Content received from the PC, to put on the clipboard.
+    pub set: Sender<Content>,
     /// Local clipboard changes, to send to the PC.
-    pub changed: Receiver<String>,
+    pub changed: Receiver<Content>,
     /// Whether a PC is connected (changes made while offline are not sent).
     pub connected: Arc<AtomicBool>,
 }
@@ -45,19 +46,18 @@ enum Tool {
     Xsel,
 }
 
-fn run(set_rx: Receiver<String>, out: Sender<String>, connected: Arc<AtomicBool>) {
+fn run(set_rx: Receiver<Content>, out: Sender<Content>, connected: Arc<AtomicBool>) {
     let mut w = Watcher::default();
     let mut tool: Option<Tool> = None;
     let mut warned = false;
     loop {
         match set_rx.recv_timeout(Duration::from_millis(400)) {
-            Ok(t) => {
-                let t = clip::normalize(&t);
-                w.set_remote(&t);
+            Ok(c) => {
+                w.set_remote(&c);
                 if let Some(tl) = tool.or_else(detect) {
-                    if write(tl, &t) {
+                    if write(tl, &c) {
                         tool = Some(tl);
-                        debug!("clipboard: received {} bytes", t.len());
+                        debug!("clipboard: received {} bytes", c.bytes().len());
                     }
                 }
             }
@@ -77,9 +77,8 @@ fn run(set_rx: Receiver<String>, out: Sender<String>, connected: Arc<AtomicBool>
                 }
                 let Some(tl) = tool else { continue };
                 if let Some(cur) = read(tl) {
-                    let cur = clip::normalize(&cur);
                     if w.changed(&cur, connected.load(Ordering::Relaxed)) {
-                        debug!("clipboard: sending {} bytes", cur.len());
+                        debug!("clipboard: sending {} bytes", cur.bytes().len());
                         if out.send(cur).is_err() {
                             return;
                         }
@@ -154,45 +153,86 @@ fn session_env() -> Vec<(&'static str, String)> {
     v
 }
 
-fn read(t: Tool) -> Option<String> {
-    run_cmd(t, true, None)
-}
-
-fn write(t: Tool, text: &str) -> bool {
-    run_cmd(t, false, Some(text)).is_some()
-}
-
-/// Run the tool for reading (`input` None) or writing; reading returns the
-/// text. Everything is bounded by a timeout so a stuck tool can't hang us.
-fn run_cmd(t: Tool, reading: bool, input: Option<&str>) -> Option<String> {
-    let (prog, args): (&str, &[&str]) = match (t, reading) {
-        (Tool::WlClipboard, true) => ("wl-paste", &["--no-newline", "--type", "text/plain"]),
-        (Tool::WlClipboard, false) => ("wl-copy", &["--type", "text/plain;charset=utf-8"]),
-        (Tool::Xclip, true) => ("xclip", &["-selection", "clipboard", "-o"]),
-        (Tool::Xclip, false) => ("xclip", &["-selection", "clipboard", "-i"]),
-        (Tool::Xsel, true) => ("xsel", &["--clipboard", "--output"]),
-        (Tool::Xsel, false) => ("xsel", &["--clipboard", "--input"]),
+/// MIME types currently offered by the clipboard owner (empty if none).
+fn types(t: Tool) -> String {
+    let args: &[&str] = match t {
+        Tool::WlClipboard => &["wl-paste", "--list-types"],
+        Tool::Xclip => &["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
+        Tool::Xsel => return String::new(),
     };
-    let mut cmd = Command::new(prog);
-    cmd.args(args)
+    run_cmd(args, None, 64 * 1024)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
+}
+
+fn read(t: Tool) -> Option<Content> {
+    let ty = types(t);
+    let has_text = ty
+        .lines()
+        .any(|l| l.starts_with("text/plain") || l == "UTF8_STRING" || l == "STRING" || l == "TEXT");
+    let has_png = ty.lines().any(|l| l == "image/png");
+    // Text first (copying cells or rich text offers an image too).
+    if has_text || t == Tool::Xsel || !has_png {
+        let args: &[&str] = match t {
+            Tool::WlClipboard => &["wl-paste", "--no-newline", "--type", "text/plain"],
+            Tool::Xclip => &["xclip", "-selection", "clipboard", "-o"],
+            Tool::Xsel => &["xsel", "--clipboard", "--output"],
+        };
+        let b = run_cmd(args, None, clip::MAX_TEXT)?;
+        let s = String::from_utf8(b).ok()?;
+        return (!s.is_empty()).then(|| Content::Text(clip::normalize(&s)));
+    }
+    let args: &[&str] = match t {
+        Tool::WlClipboard => &["wl-paste", "--type", "image/png"],
+        _ => &["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+    };
+    let b = run_cmd(args, None, clip::MAX_IMAGE)?;
+    (b.starts_with(b"\x89PNG")).then_some(Content::Png(b))
+}
+
+fn write(t: Tool, c: &Content) -> bool {
+    let args: &[&str] = match (t, c) {
+        (Tool::WlClipboard, Content::Text(_)) => &["wl-copy", "--type", "text/plain;charset=utf-8"],
+        (Tool::WlClipboard, Content::Png(_)) => &["wl-copy", "--type", "image/png"],
+        (Tool::Xclip, Content::Text(_)) => &["xclip", "-selection", "clipboard", "-i"],
+        (Tool::Xclip, Content::Png(_)) => {
+            &["xclip", "-selection", "clipboard", "-t", "image/png", "-i"]
+        }
+        (Tool::Xsel, Content::Text(_)) => &["xsel", "--clipboard", "--input"],
+        (Tool::Xsel, Content::Png(_)) => return false, // xsel can't do images
+    };
+    run_cmd(args, Some(c.bytes()), 0).is_some()
+}
+
+/// Run a clipboard tool, feeding `input` and returning up to `max` bytes of
+/// stdout. Bounded by a timeout so a stuck tool can't hang us.
+fn run_cmd(args: &[&str], input: Option<&[u8]>, max: usize) -> Option<Vec<u8>> {
+    let reading = input.is_none();
+    let mut child = Command::new(args[0])
+        .args(&args[1..])
         .envs(session_env())
-        .stdin(if input.is_some() {
+        .stdin(if reading {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
+        .stdout(if reading {
             Stdio::piped()
         } else {
             Stdio::null()
         })
-        .stdout(if reading { Stdio::piped() } else { Stdio::null() })
-        .stderr(Stdio::null());
-    let mut child = cmd.spawn().ok()?;
-    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
-        stdin.write_all(text.as_bytes()).ok()?;
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    if let (Some(data), Some(mut stdin)) = (input, child.stdin.take()) {
+        stdin.write_all(data).ok()?;
         // dropped here: EOF, so the tool takes ownership of the selection
     }
     let mut stdout = child.stdout.take();
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(s) = stdout.as_mut() {
-            let _ = s.take(clip::MAX_BYTES as u64 + 1).read_to_end(&mut buf);
+            let _ = s.take(max as u64 + 1).read_to_end(&mut buf);
         }
         buf
     });
@@ -200,7 +240,7 @@ fn run_cmd(t: Tool, reading: bool, input: Option<&str>) -> Option<String> {
     let ok = loop {
         match child.try_wait() {
             Ok(Some(st)) => break st.success(),
-            Ok(None) if start.elapsed() < Duration::from_secs(2) => {
+            Ok(None) if start.elapsed() < Duration::from_secs(4) => {
                 std::thread::sleep(Duration::from_millis(5))
             }
             _ => {
@@ -211,13 +251,5 @@ fn run_cmd(t: Tool, reading: bool, input: Option<&str>) -> Option<String> {
         }
     };
     let bytes = reader.join().unwrap_or_default();
-    if !ok {
-        return None;
-    }
-    if reading {
-        let s = String::from_utf8(bytes).ok()?;
-        (s.len() <= clip::MAX_BYTES).then_some(s)
-    } else {
-        Some(String::new())
-    }
+    (ok && (!reading || bytes.len() <= max)).then_some(bytes)
 }

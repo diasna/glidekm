@@ -72,6 +72,8 @@ pub enum Event {
     /// Either direction: one chunk of a shared text clipboard.
     Clip {
         id: u32,
+        /// 0 = UTF-8 text, 1 = PNG image.
+        kind: u8,
         idx: u16,
         count: u16,
         data: Vec<u8>,
@@ -148,12 +150,14 @@ impl Event {
             }
             Event::Clip {
                 id,
+                kind,
                 idx,
                 count,
                 data,
             } => {
                 out.push(tag::CLIP);
                 out.extend_from_slice(&id.to_le_bytes());
+                out.push(*kind);
                 out.extend_from_slice(&idx.to_le_bytes());
                 out.extend_from_slice(&count.to_le_bytes());
                 out.extend_from_slice(&(data.len() as u16).to_le_bytes());
@@ -250,17 +254,18 @@ impl Event {
                 5,
             ),
             tag::CLIP => {
-                let len = u16_at(9)? as usize;
-                let data = b.get(11..11 + len)?.to_vec();
+                let len = u16_at(10)? as usize;
+                let data = b.get(12..12 + len)?.to_vec();
                 let id = u32::from_le_bytes([*b.get(1)?, *b.get(2)?, *b.get(3)?, *b.get(4)?]);
                 (
                     Event::Clip {
                         id,
-                        idx: u16_at(5)?,
-                        count: u16_at(7)?,
+                        kind: *b.get(5)?,
+                        idx: u16_at(6)?,
+                        count: u16_at(8)?,
                         data,
                     },
-                    11 + len,
+                    12 + len,
                 )
             }
             _ => return None,
@@ -321,6 +326,7 @@ mod tests {
             },
             Event::Clip {
                 id: 0xdead_beef,
+                kind: 1,
                 idx: 1,
                 count: 3,
                 data: b"abc".to_vec(),

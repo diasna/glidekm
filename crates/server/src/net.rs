@@ -37,7 +37,7 @@ pub struct Shared {
     /// Clipboard chunks arriving from the Deck, and a finished text waiting
     /// to be put on the clipboard.
     clip_asm: Mutex<glidekm_core::clip::Assembler>,
-    pub clip_text: Mutex<Option<String>>,
+    pub clip_in: Mutex<Option<glidekm_core::clip::Content>>,
 }
 
 impl Shared {
@@ -55,7 +55,7 @@ impl Shared {
             peer_name: Mutex::new(String::new()),
             auto: AtomicBool::new(false),
             clip_asm: Mutex::new(Default::default()),
-            clip_text: Mutex::new(None),
+            clip_in: Mutex::new(None),
         })
     }
 
@@ -425,14 +425,19 @@ fn recv_loop(sock: UdpSocket, conn: Arc<Mutex<Conn>>, shared: Arc<Shared>) {
                 for ev in Event::decode_all(&plain) {
                     if let Event::Clip {
                         id,
+                        kind,
                         idx,
                         count,
                         data,
                     } = &ev
                     {
-                        let done = shared.clip_asm.lock().unwrap().push(*id, *idx, *count, data);
+                        let done = shared
+                            .clip_asm
+                            .lock()
+                            .unwrap()
+                            .push(*id, *kind, *idx, *count, data);
                         if done.is_some() {
-                            *shared.clip_text.lock().unwrap() = done;
+                            *shared.clip_in.lock().unwrap() = done;
                         }
                     }
                     if let Event::Hello { width, height } = ev {

@@ -187,7 +187,7 @@ fn run() -> Result<(), String> {
 
 struct Peer {
     addr: SocketAddr,
-    tr: Transport,
+    tr: std::sync::Arc<Transport>,
     last_rx: Instant,
     last_hello: Option<Instant>,
 }
@@ -263,7 +263,7 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
                                 d.st.deactivate();
                                 peer = Some(Peer {
                                     addr: from,
-                                    tr,
+                                    tr: std::sync::Arc::new(tr),
                                     last_rx: Instant::now(),
                                     last_hello: None,
                                 });
@@ -311,12 +311,15 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
                                     }
                                     if let Event::Clip {
                                         id,
+                                        kind,
                                         idx,
                                         count,
                                         data,
                                     } = &ev
                                     {
-                                        if let Some(t) = clip_asm.push(*id, *idx, *count, data) {
+                                        if let Some(t) =
+                                            clip_asm.push(*id, *kind, *idx, *count, data)
+                                        {
                                             let _ = d.clip.set.send(t);
                                         }
                                         continue;
@@ -349,16 +352,24 @@ fn serve(sock: &UdpSocket, psk: Option<[u8; 32]>, d: &mut Daemon) {
         d.clip
             .connected
             .store(peer.is_some(), std::sync::atomic::Ordering::Relaxed);
-        while let Ok(text) = d.clip.changed.try_recv() {
-            let Some(p) = peer.as_mut() else { continue };
-            if let Some(chunks) = glidekm_core::clip::split(clip_id, &text) {
-                clip_id = clip_id.wrapping_add(1);
-                for c in chunks {
-                    if let Ok(pkt) = p.tr.seal(&encode_all(&[c])) {
-                        let _ = sock.send_to(&pkt, p.addr);
+        while let Ok(content) = d.clip.changed.try_recv() {
+            let Some(p) = peer.as_ref() else { continue };
+            let Some(chunks) = glidekm_core::clip::split(clip_id, &content) else {
+                continue;
+            };
+            clip_id = clip_id.wrapping_add(1);
+            // Paced in its own thread: a big image takes seconds and must not
+            // stall input handling or the keep-alive.
+            if let Ok(sock) = sock.try_clone() {
+                let (tr, addr) = (p.tr.clone(), p.addr);
+                std::thread::spawn(move || {
+                    for c in chunks {
+                        if let Ok(pkt) = tr.seal(&encode_all(&[c])) {
+                            let _ = sock.send_to(&pkt, addr);
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
                     }
-                    std::thread::sleep(Duration::from_millis(1));
-                }
+                });
             }
         }
 
