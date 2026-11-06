@@ -18,6 +18,7 @@ mod sys {
     use std::ptr::null_mut;
     use std::sync::OnceLock;
     use windows_sys::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows_sys::Win32::Graphics::Gdi::{DeleteObject, HBITMAP};
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
         IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
@@ -173,6 +174,109 @@ mod sys {
         }
     }
 
+    /// Decode a PNG with GDI+ into a packed DIB (alpha flattened onto white).
+    fn png_to_dib(png: &[u8]) -> Option<Vec<u8>> {
+        use windows_sys::Win32::Graphics::Gdi::{GetObjectW, DIBSECTION};
+        use windows_sys::Win32::Graphics::GdiPlus::{
+            GdipCreateBitmapFromStream, GdipCreateHBITMAPFromBitmap, GdipDisposeImage,
+            GdiplusShutdown, GdiplusStartup, GdiplusStartupInput,
+        };
+        use windows_sys::Win32::UI::Shell::SHCreateMemStream;
+        unsafe {
+            // Copies the bytes; released below.
+            let stream = SHCreateMemStream(png.as_ptr(), png.len() as u32);
+            if stream.is_null() {
+                return None;
+            }
+            let input = GdiplusStartupInput {
+                GdiplusVersion: 1,
+                DebugEventCallback: 0,
+                SuppressBackgroundThread: 0,
+                SuppressExternalCodecs: 0,
+            };
+            let mut token = 0usize;
+            let mut out = None;
+            if GdiplusStartup(&mut token, &input, null_mut()) == 0 {
+                let mut bmp = null_mut();
+                if GdipCreateBitmapFromStream(stream, &mut bmp) == 0 && !bmp.is_null() {
+                    let mut hbm: HBITMAP = null_mut();
+                    if GdipCreateHBITMAPFromBitmap(bmp, &mut hbm, 0xFFFF_FFFF) == 0
+                        && !hbm.is_null()
+                    {
+                        let mut ds: DIBSECTION = std::mem::zeroed();
+                        let want = std::mem::size_of::<DIBSECTION>() as i32;
+                        let got = GetObjectW(hbm, want, &mut ds as *mut _ as *mut _);
+                        let bits = ds.dsBm.bmBits as *const u8;
+                        let len = (ds.dsBm.bmWidthBytes * ds.dsBm.bmHeight) as usize;
+                        if got == want && !bits.is_null() && len > 0 {
+                            let mut bi = ds.dsBmih;
+                            bi.biCompression = 0; // BI_RGB
+                            bi.biSizeImage = len as u32;
+                            let mut dib = Vec::with_capacity(40 + len);
+                            dib.extend_from_slice(std::slice::from_raw_parts(
+                                &bi as *const _ as *const u8,
+                                std::mem::size_of_val(&bi),
+                            ));
+                            dib.extend_from_slice(std::slice::from_raw_parts(bits, len));
+                            out = Some(dib);
+                        }
+                        DeleteObject(hbm);
+                    }
+                    GdipDisposeImage(bmp as _);
+                }
+                GdiplusShutdown(token);
+            }
+            let unk = stream as *mut *const windows_sys::core::IUnknown_Vtbl;
+            ((**unk).Release)(stream as _);
+            out
+        }
+    }
+
+    /// Allocate a movable global block holding `data`.
+    unsafe fn alloc(data: &[u8]) -> Option<HANDLE> {
+        let mem: HANDLE = GlobalAlloc(GMEM_MOVEABLE, data.len());
+        if mem.is_null() {
+            return None;
+        }
+        let p = GlobalLock(mem) as *mut u8;
+        if p.is_null() {
+            GlobalFree(mem);
+            return None;
+        }
+        std::ptr::copy_nonoverlapping(data.as_ptr(), p, data.len());
+        GlobalUnlock(mem);
+        Some(mem)
+    }
+
+    /// An image goes on the clipboard twice: as the registered "PNG" format
+    /// (lossless, with alpha) and as a DIB, which Windows turns into the
+    /// other bitmap formats that most apps (and .NET) paste.
+    fn put_png(png: &[u8]) -> bool {
+        unsafe {
+            let Some(pm) = alloc(png) else { return false };
+            let dm = png_to_dib(png).and_then(|d| alloc(&d));
+            if !open() {
+                GlobalFree(pm);
+                if let Some(d) = dm {
+                    GlobalFree(d);
+                }
+                return false;
+            }
+            EmptyClipboard();
+            let ok = !SetClipboardData(cf_png(), pm).is_null();
+            if !ok {
+                GlobalFree(pm);
+            }
+            if let Some(d) = dm {
+                if SetClipboardData(CF_DIB, d).is_null() {
+                    GlobalFree(d);
+                }
+            }
+            CloseClipboard();
+            ok
+        }
+    }
+
     /// Put text or an image on the clipboard.
     pub fn set(c: &Content) -> bool {
         match c {
@@ -184,7 +288,7 @@ mod sys {
                     .flat_map(|u| u.to_le_bytes())
                     .collect::<Vec<u8>>(),
             ),
-            Content::Png(b) => put(cf_png(), b),
+            Content::Png(b) => put_png(b),
             Content::Files(_) => false,
         }
     }
