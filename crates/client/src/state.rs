@@ -168,6 +168,9 @@ impl<S: Sink> State<S> {
                 Some(e) => e,
                 None => {
                     self.sink.move_rel(-2 * w - 200, -2 * h - 200);
+                    // Its own input frame: events of one frame are summed and
+                    // then clamped, which would swallow the move that follows.
+                    self.sink.flush();
                     (0, 0)
                 }
             };
