@@ -121,7 +121,7 @@ fn detect() -> Option<Tool> {
 
 /// Display variables for the desktop session. The systemd user service does
 /// not inherit them, so fall back to looking for the sockets.
-fn session_env() -> Vec<(&'static str, String)> {
+pub(crate) fn session_env() -> Vec<(&'static str, String)> {
     let mut v = Vec::new();
     let uid = unsafe { libc::getuid() };
     let rt = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{uid}"));

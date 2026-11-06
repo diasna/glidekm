@@ -352,7 +352,16 @@ mod kde {
     }
 
     fn run_with_timeout(cmd: &str, args: &[&str], t: Duration) -> Option<String> {
-        let mut child = Command::new(cmd)
+        // The systemd user service may have no (or a stale) display
+        // environment, e.g. after a Game Mode <-> Desktop Mode switch; without
+        // it kscreen-doctor's Qt aborts and dumps core on every call.
+        let env = crate::clipboard::session_env();
+        let mut c = Command::new(cmd);
+        if env.iter().any(|(k, _)| *k == "WAYLAND_DISPLAY") {
+            c.env("QT_QPA_PLATFORM", "wayland");
+        }
+        let mut child = c
+            .envs(env)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
