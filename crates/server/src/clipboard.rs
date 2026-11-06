@@ -367,7 +367,9 @@ fn run(shared: Arc<Shared>, tx: Sender<Event>) {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
-        if total >= 8 {
+        // Same rule as for received content: images and files always get a
+        // notification (even a tiny file), text only when it is large.
+        if !matches!(cur, Content::Text(_)) || cur.size() > 8000 {
             shared.set_notice("Sent to your Steam Deck", &sent_text(&cur));
         }
     }

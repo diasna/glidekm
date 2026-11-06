@@ -96,7 +96,7 @@ impl Shared {
         self.notice.lock().unwrap().take()
     }
 
-    /// Report clipboard transfer progress (`kind` 0 text, 1 image).
+    /// Report clipboard transfer progress (`kind` 0 text, 1 image, 2 files).
     pub fn set_xfer(&self, sending: bool, kind: u8, done: usize, total: usize) {
         *self.xfer.lock().unwrap() = Some(Xfer {
             sending,
@@ -116,7 +116,11 @@ impl Shared {
             return None;
         }
         let pct = (x.done * 100 / x.total).min(100) as u32;
-        let what = if x.kind == 1 { "image" } else { "text" };
+        let what = match x.kind {
+            1 => "image",
+            2 => "file",
+            _ => "text",
+        };
         let verb = if x.sending { "Sending" } else { "Receiving" };
         Some((format!("{verb} {what} {pct}%"), pct))
     }
